@@ -1,7 +1,6 @@
 pub mod find_protoc;
 
 use anyhow::Context;
-use std::env;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::{fs, iter};
@@ -114,35 +113,24 @@ impl XaiProtoBuilder {
         }
 
         // Can only process one input file when using --dependency_out=FILE.
-        // Use temp files instead of /dev/stdout and /dev/null so this works on
-        // Windows (those device paths do not exist there).
-        let temp_dir = env::temp_dir();
+        // Use relative temp files (not /dev/stdout, /dev/null, or absolute
+        // Windows paths). Absolute `C:/...` paths break protoc's `flag=value`
+        // parsing on the drive-letter colon (Windows os error 123).
         for proto in protos {
-            let dep_path = temp_dir.join(format!(
-                "xai-proto-deps-{}-{}.d",
-                std::process::id(),
-                proto
-                    .file_stem()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("proto")
-            ));
-            let desc_path = temp_dir.join(format!(
-                "xai-proto-desc-{}-{}.pb",
-                std::process::id(),
-                proto
-                    .file_stem()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("proto")
-            ));
+            let stem = proto
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("proto")
+                .replace(['/', '\\', ':', ' '], "_");
+            let dep_name = format!(".xai-proto-deps-{}-{}.d", std::process::id(), stem);
+            let desc_name = format!(".xai-proto-desc-{}-{}.pb", std::process::id(), stem);
+            let dep_path = PathBuf::from(&dep_name);
+            let desc_path = PathBuf::from(&desc_name);
 
             let mut command = Command::new(protoc.unwrap_or(Path::new("protoc")));
-            // Use forward slashes so Windows paths like `C:\...` do not break
-            // protoc's `flag=value` parsing on the drive-letter colon.
-            let dep_arg = dep_path.to_string_lossy().replace('\\', "/");
-            let desc_arg = desc_path.to_string_lossy().replace('\\', "/");
             command
-                .arg(format!("--dependency_out={dep_arg}"))
-                .arg(format!("--descriptor_set_out={desc_arg}"));
+                .arg(format!("--dependency_out={dep_name}"))
+                .arg(format!("--descriptor_set_out={desc_name}"));
 
             // Add protoc's well-known types include directory first (if found).
             // This is needed for Bazel sandboxed builds where protoc and its
