@@ -67,15 +67,24 @@ jobs:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       # Prefer the real protoc from PATH over repo bin/protoc (a Unix-only
-      # dotslash wrapper). Without this, Windows build scripts pick bin/protoc
-      # first, fail to execute it, then fall back and still misbehave.
+      # dotslash wrapper). On Windows, convert the Git-Bash path to a native
+      # Win32 path so Rust's Path::try_exists accepts it.
       - name: Point PROTOC at a real binary
         shell: bash
         run: |
           set -euo pipefail
           PROTOC_BIN="$(command -v protoc)"
+          if [[ "${{ runner.os }}" == "Windows" ]]; then
+            # /c/foo -> C:/foo (forward slashes: safe for protoc option parsing)
+            if command -v cygpath >/dev/null 2>&1; then
+              PROTOC_BIN="$(cygpath -m "$PROTOC_BIN")"
+            else
+              PROTOC_BIN="$(powershell -NoProfile -Command '(Get-Command protoc).Source' | tr -d '\r' | sed 's#\\#/#g')"
+            fi
+          fi
           echo "Using protoc at: ${PROTOC_BIN}"
-          "${PROTOC_BIN}" --version
+          # Resolve via PATH for the version check; absolute path may differ by shell.
+          protoc --version
           echo "PROTOC=${PROTOC_BIN}" >> "$GITHUB_ENV"
 
       - name: Install Rust toolchain
@@ -99,16 +108,17 @@ jobs:
       - name: Build release binary
         shell: bash
         env:
-          # Avoid jemalloc quirks on CI Windows; Unix keeps default features.
           CARGO_PROFILE_RELEASE_DEBUG: "0"
         run: |
           set -euo pipefail
-          # On Windows, disable jemalloc (Unix-only feature) for a cleaner link.
-          FEATURES=()
+          # Avoid `FEATURES=()` + set -u unbound-array expansion on empty arrays.
           if [[ "${{ runner.os }}" == "Windows" ]]; then
-            FEATURES=(--no-default-features --features sandbox-enforce)
+            # jemalloc is unix-only; keep sandbox enforcement.
+            cargo build -p xai-grok-pager-bin --release --target "${{ matrix.target }}" \
+              --no-default-features --features sandbox-enforce
+          else
+            cargo build -p xai-grok-pager-bin --release --target "${{ matrix.target }}"
           fi
-          cargo build -p xai-grok-pager-bin --release --target "${{ matrix.target }}" "${FEATURES[@]}"
           mkdir -p dist
           src="target/${{ matrix.target }}/release/${{ matrix.bin }}"
           dst="dist/${{ matrix.asset }}"

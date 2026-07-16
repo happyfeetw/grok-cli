@@ -136,9 +136,13 @@ impl XaiProtoBuilder {
             ));
 
             let mut command = Command::new(protoc.unwrap_or(Path::new("protoc")));
+            // Use forward slashes so Windows paths like `C:\...` do not break
+            // protoc's `flag=value` parsing on the drive-letter colon.
+            let dep_arg = dep_path.to_string_lossy().replace('\\', "/");
+            let desc_arg = desc_path.to_string_lossy().replace('\\', "/");
             command
-                .arg(format!("--dependency_out={}", dep_path.display()))
-                .arg(format!("--descriptor_set_out={}", desc_path.display()));
+                .arg(format!("--dependency_out={dep_arg}"))
+                .arg(format!("--descriptor_set_out={desc_arg}"));
 
             // Add protoc's well-known types include directory first (if found).
             // This is needed for Bazel sandboxed builds where protoc and its
