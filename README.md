@@ -67,8 +67,18 @@ cargo check -p xai-grok-pager-bin            # fast validation
 ```
 
 The binary artifact is named `xai-grok-pager`; official installs ship it as
-`grok`. On first launch it opens your browser to authenticate — see the
-[authentication guide](crates/codegen/xai-grok-pager/docs/user-guide/02-authentication.md).
+`grok`. To install a source build under that name:
+
+```sh
+mkdir -p ~/.local/bin
+install -m 755 target/release/xai-grok-pager ~/.local/bin/grok
+```
+
+Make sure `~/.local/bin` is on your `PATH`. On macOS, source builds honor the
+HTTP and HTTPS proxies configured in **System Settings → Network → Proxies**;
+explicit `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, and `NO_PROXY` environment
+variables still take precedence. On first launch it opens your browser to
+authenticate — see the [authentication guide](crates/codegen/xai-grok-pager/docs/user-guide/02-authentication.md).
 
 ## Documentation
 
