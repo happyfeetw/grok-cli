@@ -6,9 +6,9 @@ edition.workspace = true
 description = "Shared reqwest HTTP clients and User-Agent construction for the grok CLI."
 
 [dependencies]
-# The workspace disables reqwest's default features. Re-enable native system
-# proxy discovery here so every shared HTTP client honors macOS Network proxy
-# settings when no HTTP_PROXY/HTTPS_PROXY environment variable is present.
+# Workspace reqwest already enables `system-proxy`. Keep it explicit here so
+# shared clients keep OS proxy discovery even if a future workspace edit drops
+# the feature. Env vars (HTTP_PROXY/HTTPS_PROXY/ALL_PROXY/NO_PROXY) still win.
 reqwest = { workspace = true, features = ["blocking", "system-proxy"] }
 reqwest-middleware = { workspace = true }
 serde_json = { workspace = true }

@@ -19,11 +19,15 @@ xai-grok-version = { workspace = true }
 # - `blocking` is for build-script style use (not actually used here today, but
 #   kept for future MCP transports that may need it).
 # - `query`/`form` opt-in features stay off; rmcp transports don't use them.
+# - `system-proxy`: same OS proxy discovery as workspace reqwest 0.12 (macOS /
+#   Windows system settings; env vars take precedence). This crate cannot rely
+#   on workspace feature unification because it pins a separate major version.
 reqwest = { version = "0.13", default-features = false, features = [
     "blocking",
     "json",
     "rustls",
     "stream",
+    "system-proxy",
 ] }
 
 # Deps for credentials.rs + oauth.rs.

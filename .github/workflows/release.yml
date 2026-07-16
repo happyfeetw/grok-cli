@@ -1,0 +1,188 @@
+# Multi-platform release builds for the Grok CLI binary (xai-grok-pager).
+#
+# Trigger:
+#   - Push a tag matching v* (e.g. v0.1.220-proxy.1)
+#   - Or run manually via workflow_dispatch
+#
+# Artifacts are uploaded as a GitHub Release (create/update) named after the tag
+# or, for workflow_dispatch without a tag, after the short SHA.
+
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to create/use (e.g. v0.1.220-proxy.1). Empty = use short SHA."
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x86_64
+            os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            bin: xai-grok-pager
+            asset: grok-linux-x86_64
+          - name: macos-aarch64
+            os: macos-14
+            target: aarch64-apple-darwin
+            bin: xai-grok-pager
+            asset: grok-macos-aarch64
+          - name: macos-x86_64
+            os: macos-13
+            target: x86_64-apple-darwin
+            bin: xai-grok-pager
+            asset: grok-macos-x86_64
+          - name: windows-x86_64
+            os: windows-2022
+            target: x86_64-pc-windows-msvc
+            bin: xai-grok-pager.exe
+            asset: grok-windows-x86_64.exe
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install protoc
+        uses: arduino/setup-protoc@v3
+        with:
+          version: "29.3"
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.92.0"
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-${{ matrix.target }}
+          workspaces: "."
+
+      - name: Install Linux build deps
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libssl-dev protobuf-compiler
+
+      - name: Build release binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build -p xai-grok-pager-bin --release --target "${{ matrix.target }}"
+          mkdir -p dist
+          src="target/${{ matrix.target }}/release/${{ matrix.bin }}"
+          dst="dist/${{ matrix.asset }}"
+          cp "$src" "$dst"
+          if [[ "${{ runner.os }}" != "Windows" ]]; then
+            chmod +x "$dst"
+            # Keep a stable "grok" name inside the tarball for install convenience.
+            cp "$dst" "dist/grok"
+            tar -C dist -czf "dist/${{ matrix.asset }}.tar.gz" grok
+            shasum -a 256 "dist/${{ matrix.asset }}.tar.gz" > "dist/${{ matrix.asset }}.tar.gz.sha256"
+            rm -f dist/grok
+          else
+            # Windows: ship the .exe plus a SHA256 sidecar.
+            powershell -NoProfile -Command \
+              "Get-FileHash -Algorithm SHA256 '${dst}' | ForEach-Object { $_.Hash.ToLower() + '  ${{ matrix.asset }}' }" \
+              > "dist/${{ matrix.asset }}.sha256"
+          fi
+          ls -la dist
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve tag name
+        id: meta
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${{ github.ref_type }}" == "tag" ]]; then
+            TAG="${{ github.ref_name }}"
+          elif [[ -n "${{ inputs.tag }}" ]]; then
+            TAG="${{ inputs.tag }}"
+          else
+            TAG="v0.0.0-system-proxy.${GITHUB_SHA::7}"
+          fi
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "Resolved release tag: ${TAG}"
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      - name: List assets
+        run: find release-assets -type f | sort
+
+      - name: Create or update GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.meta.outputs.tag }}
+          name: ${{ steps.meta.outputs.tag }} — system proxy fix
+          draft: false
+          prerelease: true
+          generate_release_notes: true
+          body: |
+            ## System proxy fix
+
+            Builds from the branch that re-enables reqwest `system-proxy` after
+            workspace `default-features = false` disabled it.
+
+            ### Proxy behavior
+            - **macOS**: honors System Settings → Network → Proxies
+            - **Windows**: honors Internet Settings / system proxy
+            - **Linux**: use `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` / `NO_PROXY`
+            - Explicit env vars always take precedence over OS settings
+            - PAC / auto-config scripts are not supported
+
+            ### Assets
+            | Asset | Platform |
+            |-------|----------|
+            | `grok-linux-x86_64.tar.gz` | Linux x86_64 |
+            | `grok-macos-aarch64.tar.gz` | macOS Apple Silicon |
+            | `grok-macos-x86_64.tar.gz` | macOS Intel |
+            | `grok-windows-x86_64.exe` | Windows x86_64 |
+
+            Unpack (Unix) and install:
+            ```sh
+            tar -xzf grok-*.tar.gz
+            install -m 755 grok ~/.local/bin/grok
+            ```
+          files: |
+            release-assets/**
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

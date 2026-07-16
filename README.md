@@ -74,11 +74,23 @@ mkdir -p ~/.local/bin
 install -m 755 target/release/xai-grok-pager ~/.local/bin/grok
 ```
 
-Make sure `~/.local/bin` is on your `PATH`. On macOS, source builds honor the
-HTTP and HTTPS proxies configured in **System Settings → Network → Proxies**;
-explicit `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, and `NO_PROXY` environment
-variables still take precedence. On first launch it opens your browser to
-authenticate — see the [authentication guide](crates/codegen/xai-grok-pager/docs/user-guide/02-authentication.md).
+Make sure `~/.local/bin` is on your `PATH`. On first launch it opens your
+browser to authenticate — see the
+[authentication guide](crates/codegen/xai-grok-pager/docs/user-guide/02-authentication.md).
+
+### HTTP proxies
+
+Shared HTTP clients (API traffic, uploads, MCP HTTP transports) discover
+proxies as follows:
+
+| Platform | System settings | Environment variables |
+|----------|-----------------|------------------------|
+| macOS | **System Settings → Network → Proxies** | `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, `NO_PROXY` (take precedence) |
+| Windows | Settings → Network & Internet → Proxy (Internet Settings registry) | same env vars (take precedence) |
+| Linux | not read (no desktop-proxy backend in reqwest) | env vars are the supported path |
+
+Limitations: PAC / auto-config scripts are not evaluated; proxy settings are
+read when each process-wide client is first built.
 
 ## Documentation
 

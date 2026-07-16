@@ -202,7 +202,11 @@ ratatui-core = "0.1"
 rayon = "1"
 reflink-copy = "0.1"
 regex = "1"
-reqwest = { version = "0.12", features = ["rustls-tls", "stream", "json", "multipart", "http2", "blocking", "socks"], default-features = false }
+# `default-features = false` drops reqwest's default `system-proxy`. Re-enable
+# it so clients honor macOS Network / Windows Internet Settings proxies when
+# HTTP_PROXY/HTTPS_PROXY/ALL_PROXY are unset. Linux still uses env vars only
+# (reqwest/hyper-util have no desktop-proxy backend there).
+reqwest = { version = "0.12", features = ["rustls-tls", "stream", "json", "multipart", "http2", "blocking", "socks", "system-proxy"], default-features = false }
 reqwest-middleware = { version = "0.4.1", features = ["json", "multipart"] }
 resvg = { version = "0.47", default-features = false, features = ["text"] }
 ring = "0.17"
