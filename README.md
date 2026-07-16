@@ -80,17 +80,18 @@ browser to authenticate — see the
 
 ### HTTP proxies
 
-Shared HTTP clients (API traffic, uploads, MCP HTTP transports) discover
-proxies as follows:
+Shared HTTP clients (API, sampling, uploads, and MCP HTTP transports) honor
+proxies via reqwest's `system-proxy` feature:
 
-| Platform | System settings | Environment variables |
-|----------|-----------------|------------------------|
-| macOS | **System Settings → Network → Proxies** | `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, `NO_PROXY` (take precedence) |
-| Windows | Settings → Network & Internet → Proxy (Internet Settings registry) | same env vars (take precedence) |
-| Linux | not read (no desktop-proxy backend in reqwest) | env vars are the supported path |
+| Platform | Behavior |
+|----------|----------|
+| **macOS** | Reads **System Settings → Network → Proxies** when the corresponding env var is unset |
+| **Linux** | Environment variables only (`HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, `NO_PROXY`) |
+| Windows | Same feature also reads Internet Settings if you build there; Windows is still best-effort for this tree |
 
-Limitations: PAC / auto-config scripts are not evaluated; proxy settings are
-read when each process-wide client is first built.
+Explicit `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` / `NO_PROXY` always take
+precedence over OS settings. PAC / auto-config scripts are not evaluated, and
+proxy configuration is read when each process-wide client is first built.
 
 ## Documentation
 

@@ -203,8 +203,8 @@ rayon = "1"
 reflink-copy = "0.1"
 regex = "1"
 # `default-features = false` drops reqwest's default `system-proxy`. Re-enable
-# it so clients honor macOS Network / Windows Internet Settings proxies when
-# HTTP_PROXY/HTTPS_PROXY/ALL_PROXY are unset. Linux still uses env vars only
+# so shared clients honor OS proxy settings (notably macOS Network proxies)
+# when HTTP_PROXY/HTTPS_PROXY/ALL_PROXY are unset. Linux remains env-only
 # (reqwest/hyper-util have no desktop-proxy backend there).
 reqwest = { version = "0.12", features = ["rustls-tls", "stream", "json", "multipart", "http2", "blocking", "socks", "system-proxy"], default-features = false }
 reqwest-middleware = { version = "0.4.1", features = ["json", "multipart"] }

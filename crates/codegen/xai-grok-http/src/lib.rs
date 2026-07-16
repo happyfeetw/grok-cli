@@ -15,6 +15,12 @@
 //!   HTTP/1.1 client used by `send_with_retry_escaping_pool` for the
 //!   final retry attempt to escape a poisoned pool within a tight budget.
 //!
+//! All of these builders leave reqwest's automatic proxy discovery on
+//! (`system-proxy`). Env vars (`HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` /
+//! `NO_PROXY`) take precedence; on macOS, System Settings proxies fill in
+//! when env is unset. Proxy config is read when each `OnceLock` client is
+//! first built.
+//!
 //! Sampling traffic uses process-wide shared clients owned by
 //! `xai_grok_sampler::shared_http` (one HTTP/2 pooled client plus
 //! a pool-less HTTP/1.1 fallback shared across every
