@@ -1,0 +1,116 @@
+#!/usr/bin/env node
+// Thin trampoline: resolve the real grok binary from the matching optional
+// platform package and exec it.
+//
+// Priority:
+//   1. ~/.grok/bin/grok              (postinstall canonical symlink)
+//   2. @spikewang/grok-cli-<plat>/bin/grok
+//   3. same path with .br (brotli) — decompress on first use
+const { spawn } = require('child_process');
+const path = require('path');
+const fs = require('fs');
+const os = require('os');
+const zlib = require('zlib');
+
+const pkgName = '@spikewang/grok-cli';
+const BIN_NAME = 'grok';
+const CANONICAL_DIR = path.join(os.homedir(), '.grok', 'bin');
+const CANONICAL_PATH = path.join(CANONICAL_DIR, BIN_NAME);
+
+function readLocalVersion() {
+  try {
+    return require('../package.json').version;
+  } catch {
+    return undefined;
+  }
+}
+
+function platformKey() {
+  return `${process.platform}-${process.arch}`;
+}
+
+function resolvePlatformPackageDir() {
+  const platformPkg = `${pkgName}-${process.platform}-${process.arch}`;
+  try {
+    return path.dirname(require.resolve(`${platformPkg}/package.json`));
+  } catch {
+    return null;
+  }
+}
+
+function decompressBrotli(brPath, outPath) {
+  const compressed = fs.readFileSync(brPath);
+  const decompressed = zlib.brotliDecompressSync(compressed);
+  const tmp = `${outPath}.tmp.${process.pid}`;
+  fs.writeFileSync(tmp, decompressed);
+  fs.chmodSync(tmp, 0o755);
+  try {
+    fs.renameSync(tmp, outPath);
+  } catch {
+    try {
+      fs.unlinkSync(tmp);
+    } catch {}
+  }
+}
+
+function bootstrapCanonical(sourceBinPath, version) {
+  try {
+    fs.mkdirSync(CANONICAL_DIR, { recursive: true });
+    const versionedName = `grok-${version}`;
+    const versionedPath = path.join(CANONICAL_DIR, versionedName);
+    if (!fs.existsSync(versionedPath)) {
+      const tmpPath = `${versionedPath}.tmp.${process.pid}`;
+      fs.copyFileSync(sourceBinPath, tmpPath);
+      fs.chmodSync(tmpPath, 0o755);
+      fs.renameSync(tmpPath, versionedPath);
+    }
+    const tmpLink = `${CANONICAL_PATH}.link.${process.pid}`;
+    try {
+      fs.unlinkSync(tmpLink);
+    } catch {}
+    fs.symlinkSync(versionedName, tmpLink);
+    fs.renameSync(tmpLink, CANONICAL_PATH);
+    return CANONICAL_PATH;
+  } catch {
+    return sourceBinPath;
+  }
+}
+
+function resolveBinary() {
+  if (fs.existsSync(CANONICAL_PATH)) return CANONICAL_PATH;
+
+  const platformDir = resolvePlatformPackageDir();
+  if (!platformDir) {
+    console.error(
+      `${pkgName}: no platform binary for ${platformKey()}.`,
+    );
+    console.error(
+      `  Expected optional dependency ${pkgName}-${process.platform}-${process.arch}.`,
+    );
+    console.error('  Only macOS arm64/x64 are published. Do not use --no-optional.');
+    process.exit(1);
+  }
+
+  const rawPath = path.join(platformDir, 'bin', BIN_NAME);
+  const brPath = `${rawPath}.br`;
+  if (!fs.existsSync(rawPath) && fs.existsSync(brPath)) {
+    decompressBrotli(brPath, rawPath);
+  }
+  if (!fs.existsSync(rawPath)) {
+    console.error(`${pkgName}: missing binary at ${rawPath}`);
+    process.exit(1);
+  }
+
+  const version = readLocalVersion();
+  return version ? bootstrapCanonical(rawPath, version) : rawPath;
+}
+
+const execPath = resolveBinary();
+const child = spawn(execPath, process.argv.slice(2), {
+  stdio: 'inherit',
+  env: { ...process.env, GROK_MANAGED_BY_NPM: '1', GROK_NPM_PACKAGE: pkgName },
+});
+child.on('exit', (code, signal) => {
+  if (signal) process.kill(process.pid, signal);
+  else process.exit(code ?? 0);
+});

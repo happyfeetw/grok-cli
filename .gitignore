@@ -2,8 +2,9 @@
 **/*.rs.bk
 .DS_Store
 
-# packaging: assembled npm binaries (built in CI / locally, not committed)
-packaging/npm/**/bin/*.br
-packaging/npm/**/bin/grok
-packaging/npm/**/bin/grok.exe
+# packaging: assembled platform binaries (built in CI / locally, not committed)
+# Keep packaging/npm/grok-cli/bin/grok (Node trampoline) tracked.
+packaging/npm/grok-cli-darwin-*/bin/*.br
+packaging/npm/grok-cli-darwin-*/bin/grok
+packaging/npm/grok-cli-darwin-*/bin/grok.exe
 packaging/npm/.npmrc
