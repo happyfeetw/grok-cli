@@ -66,6 +66,18 @@ jobs:
           version: "29.3"
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
+      # Prefer the real protoc from PATH over repo bin/protoc (a Unix-only
+      # dotslash wrapper). Without this, Windows build scripts pick bin/protoc
+      # first, fail to execute it, then fall back and still misbehave.
+      - name: Point PROTOC at a real binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          PROTOC_BIN="$(command -v protoc)"
+          echo "Using protoc at: ${PROTOC_BIN}"
+          "${PROTOC_BIN}" --version
+          echo "PROTOC=${PROTOC_BIN}" >> "$GITHUB_ENV"
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@master
         with:
@@ -82,13 +94,21 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y pkg-config libssl-dev protobuf-compiler
+          sudo apt-get install -y pkg-config libssl-dev
 
       - name: Build release binary
         shell: bash
+        env:
+          # Avoid jemalloc quirks on CI Windows; Unix keeps default features.
+          CARGO_PROFILE_RELEASE_DEBUG: "0"
         run: |
           set -euo pipefail
-          cargo build -p xai-grok-pager-bin --release --target "${{ matrix.target }}"
+          # On Windows, disable jemalloc (Unix-only feature) for a cleaner link.
+          FEATURES=()
+          if [[ "${{ runner.os }}" == "Windows" ]]; then
+            FEATURES=(--no-default-features --features sandbox-enforce)
+          fi
+          cargo build -p xai-grok-pager-bin --release --target "${{ matrix.target }}" "${FEATURES[@]}"
           mkdir -p dist
           src="target/${{ matrix.target }}/release/${{ matrix.bin }}"
           dst="dist/${{ matrix.asset }}"
