@@ -1,0 +1,48 @@
+{
+    "name": "@spikewang/grok-cli",
+    "version": "0.1.221",
+    "description": "Grok coding agent CLI (fork with macOS/system-proxy support)",
+    "license": "Apache-2.0",
+    "repository": {
+        "type": "git",
+        "url": "git+https://github.com/happyfeetw/grok-cli.git"
+    },
+    "homepage": "https://github.com/happyfeetw/grok-cli#readme",
+    "bugs": {
+        "url": "https://github.com/happyfeetw/grok-cli/issues"
+    },
+    "bin": {
+        "grok": "bin/grok",
+        "grok-cli": "bin/grok"
+    },
+    "files": [
+        "bin/"
+    ],
+    "os": [
+        "darwin"
+    ],
+    "cpu": [
+        "arm64",
+        "x64"
+    ],
+    "scripts": {
+        "postinstall": "node bin/postinstall.js"
+    },
+    "publishConfig": {
+        "access": "public",
+        "registry": "https://registry.npmjs.org/"
+    },
+    "engines": {
+        "node": ">=18"
+    },
+    "optionalDependencies": {
+        "@spikewang/grok-cli-darwin-arm64": "0.1.221",
+        "@spikewang/grok-cli-darwin-x64": "0.1.221"
+    },
+    "keywords": [
+        "grok",
+        "cli",
+        "xai",
+        "coding-agent"
+    ]
+}

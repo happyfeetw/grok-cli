@@ -1,20 +1,14 @@
-# macOS-only release builds of the Grok CLI binary.
+# macOS release pipeline for @spikewang/grok-cli
 #
-# Asset naming (stable contract):
-#   grok-<version>-darwin-<arch>.tar.gz
-#   grok-<version>-darwin-<arch>.tar.gz.sha256
+# Tag v* must equal packaging/VERSION (e.g. VERSION=0.1.221 → tag v0.1.221).
 #
-# where:
-#   <version> = release tag without the leading "v"
-#               e.g. tag v0.1.220-system-proxy.1 → 0.1.220-system-proxy.1
-#   <arch>    = aarch64 | x86_64
+# Pipeline:
+#   1. Build darwin-arm64 + darwin-x64
+#   2. GitHub Release tarballs (grok-cli-<ver>-darwin-<arm64|x64>.tar.gz)
+#   3. Commit Formula/grok-cli.rb with real sha256 to main
+#   4. npm publish @spikewang/grok-cli* when NPM_TOKEN is configured
 #
-# Archive contents:
-#   grok   # installable binary (same name as official installs)
-#
-# Triggers:
-#   - push of tag matching v*
-#   - workflow_dispatch with optional tag input
+# Archive payload: single binary named `grok`
 
 name: Release macOS
 
@@ -25,7 +19,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Release tag (e.g. v0.1.220-system-proxy.1). Empty = short SHA."
+        description: "Release tag (e.g. v0.1.221). Empty uses packaging/VERSION."
         required: false
         default: ""
 
@@ -35,12 +29,40 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
-  # Package product name (user-facing). Cargo crate still builds xai-grok-pager.
-  PRODUCT_NAME: grok
+  PRODUCT: grok-cli
+  BINARY: grok
 
 jobs:
+  meta:
+    name: Resolve version
+    runs-on: ubuntu-22.04
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      tag: ${{ steps.v.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: v
+        run: |
+          set -euo pipefail
+          FILE_VERSION="$(tr -d '[:space:]' < packaging/VERSION)"
+          if [[ "${{ github.ref_type }}" == "tag" ]]; then
+            TAG="${{ github.ref_name }}"
+          elif [[ -n "${{ inputs.tag }}" ]]; then
+            TAG="${{ inputs.tag }}"
+          else
+            TAG="v${FILE_VERSION}"
+          fi
+          VERSION="${TAG#v}"
+          if [[ "$VERSION" != "$FILE_VERSION" ]]; then
+            echo "::error::tag version ($VERSION) must match packaging/VERSION ($FILE_VERSION)"
+            exit 1
+          fi
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
   build-macos:
-    name: darwin-${{ matrix.arch }}
+    name: darwin-${{ matrix.npm_arch }}
+    needs: meta
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -48,181 +70,207 @@ jobs:
         include:
           - os: macos-14
             target: aarch64-apple-darwin
-            arch: aarch64
+            npm_arch: arm64
           - os: macos-13
             target: x86_64-apple-darwin
-            arch: x86_64
-
+            npm_arch: x64
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Install protoc
-        uses: arduino/setup-protoc@v3
+      - uses: arduino/setup-protoc@v3
         with:
           version: "29.3"
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
-      # Prefer the real protoc over repo bin/protoc (dotslash wrapper).
       - name: Point PROTOC at a real binary
         run: |
           set -euo pipefail
-          PROTOC_BIN="$(command -v protoc)"
-          echo "Using protoc at: ${PROTOC_BIN}"
-          "${PROTOC_BIN}" --version
-          echo "PROTOC=${PROTOC_BIN}" >> "$GITHUB_ENV"
+          echo "PROTOC=$(command -v protoc)" >> "$GITHUB_ENV"
+          protoc --version
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@master
+      - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.92.0"
           targets: ${{ matrix.target }}
 
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@v2
         with:
           shared-key: release-macos-${{ matrix.target }}
-          workspaces: "."
 
       - name: Build release binary
+        run: cargo build -p xai-grok-pager-bin --release --target "${{ matrix.target }}"
+
+      - name: Package tarball + stage binary
         run: |
           set -euo pipefail
-          cargo build -p xai-grok-pager-bin --release --target "${{ matrix.target }}"
+          VERSION="${{ needs.meta.outputs.version }}"
+          ARCH="${{ matrix.npm_arch }}"
+          STEM="${PRODUCT}-${VERSION}-darwin-${ARCH}"
+          TAR="${STEM}.tar.gz"
 
-      - name: Package asset
-        id: package
-        run: |
-          set -euo pipefail
+          mkdir -p dist/pkg stage
+          SRC="target/${{ matrix.target }}/release/xai-grok-pager"
+          test -f "$SRC"
+          cp "$SRC" "dist/pkg/${BINARY}"
+          cp "$SRC" "stage/xai-grok-pager"
+          chmod +x "dist/pkg/${BINARY}" "stage/xai-grok-pager"
+          strip -x "dist/pkg/${BINARY}" 2>/dev/null || true
 
-          # Version string for filenames: strip leading "v" from the tag.
-          if [[ "${{ github.ref_type }}" == "tag" ]]; then
-            RAW_TAG="${{ github.ref_name }}"
-          elif [[ -n "${{ inputs.tag }}" ]]; then
-            RAW_TAG="${{ inputs.tag }}"
-          else
-            RAW_TAG="0.0.0-dev.${GITHUB_SHA::7}"
-          fi
-          VERSION="${RAW_TAG#v}"
-          ARCH="${{ matrix.arch }}"
-          ASSET_STEM="${PRODUCT_NAME}-${VERSION}-darwin-${ARCH}"
-          ASSET_TAR="${ASSET_STEM}.tar.gz"
-          ASSET_SHA="${ASSET_TAR}.sha256"
-
-          mkdir -p dist/pkg
-          BIN_SRC="target/${{ matrix.target }}/release/xai-grok-pager"
-          test -f "$BIN_SRC"
-          # Official installs ship the binary as `grok`.
-          cp "$BIN_SRC" "dist/pkg/${PRODUCT_NAME}"
-          chmod +x "dist/pkg/${PRODUCT_NAME}"
-
-          # Optional strip for smaller downloads (ignore failure on thin binaries).
-          strip -x "dist/pkg/${PRODUCT_NAME}" 2>/dev/null || true
-
-          tar -C dist/pkg -czf "dist/${ASSET_TAR}" "${PRODUCT_NAME}"
+          tar -C dist/pkg -czf "dist/${TAR}" "${BINARY}"
           (
             cd dist
-            shasum -a 256 "${ASSET_TAR}" > "${ASSET_SHA}"
+            shasum -a 256 "${TAR}" | tee "${TAR}.sha256"
           )
+          cut -d' ' -f1 "dist/${TAR}.sha256" | tr -d '\n' > "dist/${STEM}.sha256hex"
+          ls -la dist stage
 
-          ls -la dist
-          echo "asset_tar=${ASSET_TAR}" >> "$GITHUB_OUTPUT"
-          echo "asset_sha=${ASSET_SHA}" >> "$GITHUB_OUTPUT"
-          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
-          echo "raw_tag=${RAW_TAG}" >> "$GITHUB_OUTPUT"
-
-      - name: Upload build artifact
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
-          name: ${{ env.PRODUCT_NAME }}-${{ steps.package.outputs.version }}-darwin-${{ matrix.arch }}
+          name: ${{ env.PRODUCT }}-${{ needs.meta.outputs.version }}-darwin-${{ matrix.npm_arch }}
           path: |
-            dist/${{ steps.package.outputs.asset_tar }}
-            dist/${{ steps.package.outputs.asset_sha }}
+            dist/*
+            stage/xai-grok-pager
           if-no-files-found: error
           retention-days: 14
 
-  publish:
-    name: Publish GitHub Release
-    needs: build-macos
+  github-release:
+    name: GitHub Release
+    needs: [meta, build-macos]
     runs-on: ubuntu-22.04
+    outputs:
+      arm64_sha: ${{ steps.shas.outputs.arm64_sha }}
+      x64_sha: ${{ steps.shas.outputs.x64_sha }}
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
 
-      - name: Resolve tag
-        id: meta
+      - name: Collect assets + shas
+        id: shas
         run: |
           set -euo pipefail
-          if [[ "${{ github.ref_type }}" == "tag" ]]; then
-            TAG="${{ github.ref_name }}"
-          elif [[ -n "${{ inputs.tag }}" ]]; then
-            TAG="${{ inputs.tag }}"
-          else
-            TAG="v0.0.0-dev.${GITHUB_SHA::7}"
-          fi
-          VERSION="${TAG#v}"
-          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
-          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
-          echo "Resolved tag=${TAG} version=${VERSION}"
+          VERSION="${{ needs.meta.outputs.version }}"
+          mkdir -p release-assets
+          find artifacts -type f \( -name '*.tar.gz' -o -name '*.tar.gz.sha256' \) -print -exec cp {} release-assets/ \;
+          ls -la release-assets
 
-      - name: Download all artifacts
-        uses: actions/download-artifact@v4
+          ARM64_SHA=$(cat "artifacts/${PRODUCT}-${VERSION}-darwin-arm64/${PRODUCT}-${VERSION}-darwin-arm64.sha256hex")
+          X64_SHA=$(cat "artifacts/${PRODUCT}-${VERSION}-darwin-x64/${PRODUCT}-${VERSION}-darwin-x64.sha256hex")
+          echo "arm64_sha=${ARM64_SHA}" >> "$GITHUB_OUTPUT"
+          echo "x64_sha=${X64_SHA}" >> "$GITHUB_OUTPUT"
+
+      - uses: softprops/action-gh-release@v2
         with:
-          path: release-assets
-          merge-multiple: true
-
-      - name: List assets
-        run: |
-          set -euo pipefail
-          find release-assets -type f | sort
-          # Expect two arches × (tar + sha256)
-          ls -la release-assets/
-
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ steps.meta.outputs.tag }}
-          name: grok ${{ steps.meta.outputs.version }} (macOS)
+          tag_name: ${{ needs.meta.outputs.tag }}
+          name: grok-cli ${{ needs.meta.outputs.version }} (macOS)
           draft: false
-          prerelease: true
+          prerelease: false
           generate_release_notes: true
           body: |
-            ## macOS builds — system proxy fix
+            ## grok-cli ${{ needs.meta.outputs.version }}
 
-            Prebuilt **macOS only** binaries of the Grok CLI (`xai-grok-pager`, shipped as `grok`) with reqwest `system-proxy` enabled.
-
-            ### Download naming
-
-            | Asset | Platform |
-            |-------|----------|
-            | `grok-${{ steps.meta.outputs.version }}-darwin-aarch64.tar.gz` | Apple Silicon (M1/M2/M3/…) |
-            | `grok-${{ steps.meta.outputs.version }}-darwin-x86_64.tar.gz` | Intel Mac |
-
-            Each archive is accompanied by a `.sha256` checksum file.
+            Community fork of Grok Build CLI with **system-proxy** enabled
+            (honors macOS System Settings proxies when env vars are unset).
 
             ### Install
 
+            **npm / bun**
             ```sh
-            # Apple Silicon
-            tar -xzf grok-${{ steps.meta.outputs.version }}-darwin-aarch64.tar.gz
-            # Intel
-            # tar -xzf grok-${{ steps.meta.outputs.version }}-darwin-x86_64.tar.gz
-
-            install -m 755 grok ~/.local/bin/grok
-            # ensure ~/.local/bin is on PATH
-            grok --version || true
+            npm install -g @spikewang/grok-cli
+            # bun add -g @spikewang/grok-cli
             ```
 
-            ### Proxy behavior (this build)
+            **Homebrew**
+            ```sh
+            brew tap happyfeetw/grok-cli https://github.com/happyfeetw/grok-cli
+            brew install grok-cli
+            # or after tap: brew upgrade grok-cli
+            ```
 
-            - **macOS**: honors **System Settings → Network → Proxies** when env is unset
-            - Env vars `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` / `NO_PROXY` always take precedence
-            - PAC / auto-config scripts are not supported
+            **GitHub Release tarball**
+            ```sh
+            tar -xzf grok-cli-${{ needs.meta.outputs.version }}-darwin-arm64.tar.gz   # Apple Silicon
+            # tar -xzf grok-cli-${{ needs.meta.outputs.version }}-darwin-x64.tar.gz  # Intel
+            install -m 755 grok ~/.local/bin/grok
+            ```
 
-            ### Notes
+            ### Assets
 
-            - Linux users: build from source or set proxy env vars; this release does not ship Linux binaries.
-            - Windows is not supported by this release pipeline.
-          files: |
-            release-assets/*
+            | File | Platform |
+            |------|----------|
+            | `grok-cli-${{ needs.meta.outputs.version }}-darwin-arm64.tar.gz` | macOS Apple Silicon |
+            | `grok-cli-${{ needs.meta.outputs.version }}-darwin-x64.tar.gz` | macOS Intel |
+
+            Each archive contains a single `grok` binary. Checksums: `*.sha256`.
+          files: release-assets/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  update-homebrew-formula:
+    name: Update Homebrew formula
+    needs: [meta, github-release]
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Rewrite Formula/grok-cli.rb
+        run: |
+          set -euo pipefail
+          node packaging/scripts/update-formula.js \
+            --version "${{ needs.meta.outputs.version }}" \
+            --arm64-sha "${{ needs.github-release.outputs.arm64_sha }}" \
+            --x64-sha "${{ needs.github-release.outputs.x64_sha }}"
+          cat Formula/grok-cli.rb
+
+      - name: Commit formula if changed
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Formula/grok-cli.rb
+          if git diff --staged --quiet; then
+            echo "Formula unchanged"
+            exit 0
+          fi
+          git commit -m "chore(homebrew): bump grok-cli to ${{ needs.meta.outputs.version }}"
+          git pull --rebase origin main
+          git push origin HEAD:main
+
+  npm-publish:
+    name: Publish npm packages
+    needs: [meta, build-macos, github-release]
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          registry-url: "https://registry.npmjs.org"
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Assemble + publish
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${NPM_TOKEN:-}" ]]; then
+            echo "::warning::NPM_TOKEN secret not set; skipping npm publish"
+            echo "Add repo secret NPM_TOKEN (npm automation token with publish rights for @spikewang)."
+            exit 0
+          fi
+          VERSION="${{ needs.meta.outputs.version }}"
+          ARM=$(find artifacts -path "*darwin-arm64*" -name 'xai-grok-pager' -type f | head -1)
+          X64=$(find artifacts -path "*darwin-x64*" -name 'xai-grok-pager' -type f | head -1)
+          echo "ARM=$ARM"
+          echo "X64=$X64"
+          test -n "$ARM" && test -n "$X64"
+          export GROK_DARWIN_ARM64="$ARM"
+          export GROK_DARWIN_X64="$X64"
+          node packaging/scripts/assemble-npm.js
+          node packaging/scripts/publish-npm.js

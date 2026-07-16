@@ -1,3 +1,9 @@
 /target
 **/*.rs.bk
 .DS_Store
+
+# packaging: assembled npm binaries (built in CI / locally, not committed)
+packaging/npm/**/bin/*.br
+packaging/npm/**/bin/grok
+packaging/npm/**/bin/grok.exe
+packaging/npm/.npmrc

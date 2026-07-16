@@ -1,0 +1,30 @@
+class GrokCli < Formula
+  desc "Grok coding agent CLI (fork with system-proxy support)"
+  homepage "https://github.com/happyfeetw/grok-cli"
+  version "0.1.221"
+  license "Apache-2.0"
+
+  livecheck do
+    url :stable
+    strategy :github_latest
+  end
+
+  on_macos do
+    on_arm do
+      url "https://github.com/happyfeetw/grok-cli/releases/download/v0.1.221/grok-cli-0.1.221-darwin-arm64.tar.gz"
+      sha256 "0000000000000000000000000000000000000000000000000000000000000000"
+    end
+    on_intel do
+      url "https://github.com/happyfeetw/grok-cli/releases/download/v0.1.221/grok-cli-0.1.221-darwin-x64.tar.gz"
+      sha256 "0000000000000000000000000000000000000000000000000000000000000000"
+    end
+  end
+
+  def install
+    bin.install "grok"
+  end
+
+  test do
+    assert_predicate bin/"grok", :exist?
+  end
+end

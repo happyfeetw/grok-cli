@@ -16,8 +16,9 @@ commands, searches the web, and manages long-running tasks — interactively,
 headlessly for scripting/CI, or embedded in editors via the Agent Client
 Protocol (ACP).
 
-[Installing the released binary](#installing-the-released-binary) ·
+[Install](#install) ·
 [Building from source](#building-from-source) ·
+[HTTP proxies](#http-proxies) ·
 [Documentation](#documentation) ·
 [Repository layout](#repository-layout) ·
 [Development](#development) ·
@@ -35,18 +36,71 @@ runtime. It is synced periodically from the SpaceXAI monorepo.
 
 ---
 
-## Installing the released binary
+## Install
 
-Prebuilt binaries are published for macOS, Linux, and Windows:
+This repository is a **community fork** (`happyfeetw/grok-cli`) of open-source
+Grok Build, with **system-proxy** re-enabled and macOS-focused packaging under
+the product name **`grok-cli`**.
+
+Version source of truth: [`packaging/VERSION`](packaging/VERSION) (currently
+kept in lockstep with git tags `v*`, npm, and Homebrew).
+
+### npm / bun (macOS)
+
+```sh
+npm install -g @spikewang/grok-cli
+# or
+bun add -g @spikewang/grok-cli
+
+grok --version    # primary command
+grok-cli --version  # alias
+```
+
+Publishes only **macOS** optional binaries:
+
+| Package | Platform |
+|---------|----------|
+| `@spikewang/grok-cli` | meta package (trampoline + postinstall) |
+| `@spikewang/grok-cli-darwin-arm64` | Apple Silicon |
+| `@spikewang/grok-cli-darwin-x64` | Intel |
+
+### Homebrew (macOS)
+
+```sh
+brew tap happyfeetw/grok-cli https://github.com/happyfeetw/grok-cli
+brew install grok-cli
+grok --version
+```
+
+Formula: [`Formula/grok-cli.rb`](Formula/grok-cli.rb) (sha256 updated by the
+release workflow).
+
+### GitHub Releases (macOS tarballs)
+
+Other channels are limited to GitHub Release archives:
+
+```text
+grok-cli-<version>-darwin-arm64.tar.gz
+grok-cli-<version>-darwin-x64.tar.gz
+```
+
+Each archive contains a single `grok` binary (+ matching `.sha256` files).
+
+```sh
+tar -xzf grok-cli-<version>-darwin-arm64.tar.gz
+install -m 755 grok ~/.local/bin/grok
+```
+
+See [Releases](https://github.com/happyfeetw/grok-cli/releases).
+
+### Official upstream installer
+
+Upstream SpaceXAI builds (not this fork):
 
 ```sh
 curl -fsSL https://x.ai/cli/install.sh | bash   # macOS / Linux / Git Bash
 irm https://x.ai/cli/install.ps1 | iex          # Windows PowerShell
-grok --version
 ```
-
-See the [changelog](https://x.ai/build/changelog) for the latest fixes,
-features, and improvements in each release.
 
 ## Building from source
 
@@ -78,17 +132,10 @@ Make sure `~/.local/bin` is on your `PATH`. On first launch it opens your
 browser to authenticate — see the
 [authentication guide](crates/codegen/xai-grok-pager/docs/user-guide/02-authentication.md).
 
-Prebuilt **macOS** binaries (when published) use the asset names:
+Packaging internals (version sync, npm assemble, formula rewrite): see
+[`packaging/README.md`](packaging/README.md).
 
-```text
-grok-<version>-darwin-aarch64.tar.gz   # Apple Silicon
-grok-<version>-darwin-x86_64.tar.gz    # Intel
-```
-
-Each archive contains a single `grok` binary. See the repository
-[Releases](https://github.com/happyfeetw/grok-cli/releases) page.
-
-### HTTP proxies
+## HTTP proxies
 
 Shared HTTP clients (API, sampling, uploads, and MCP HTTP transports) honor
 proxies via reqwest's `system-proxy` feature:
@@ -117,6 +164,8 @@ MCP servers, skills, plugins, hooks, headless mode, sandboxing, and more.
 
 | Path | Contents |
 |------|----------|
+| `packaging/` | Version file, npm packages (`@spikewang/grok-cli*`), release scripts |
+| `Formula/grok-cli.rb` | Homebrew formula |
 | `crates/codegen/xai-grok-pager-bin` | Composition-root package; builds the `xai-grok-pager` binary |
 | `crates/codegen/xai-grok-pager` | The TUI: scrollback, prompt, modals, rendering |
 | `crates/codegen/xai-grok-shell` | Agent runtime + leader/stdio/headless entry points |

@@ -1,0 +1,24 @@
+{
+    "name": "@spikewang/grok-cli-darwin-arm64",
+    "version": "0.1.221",
+    "description": "darwin-arm64 binary for @spikewang/grok-cli. Do not install directly.",
+    "license": "Apache-2.0",
+    "repository": {
+        "type": "git",
+        "url": "git+https://github.com/happyfeetw/grok-cli.git",
+        "directory": "packaging/npm/grok-cli-darwin-arm64"
+    },
+    "files": [
+        "bin/"
+    ],
+    "os": [
+        "darwin"
+    ],
+    "cpu": [
+        "arm64"
+    ],
+    "publishConfig": {
+        "access": "public",
+        "registry": "https://registry.npmjs.org/"
+    }
+}
