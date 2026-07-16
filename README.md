@@ -78,6 +78,16 @@ Make sure `~/.local/bin` is on your `PATH`. On first launch it opens your
 browser to authenticate — see the
 [authentication guide](crates/codegen/xai-grok-pager/docs/user-guide/02-authentication.md).
 
+Prebuilt **macOS** binaries (when published) use the asset names:
+
+```text
+grok-<version>-darwin-aarch64.tar.gz   # Apple Silicon
+grok-<version>-darwin-x86_64.tar.gz    # Intel
+```
+
+Each archive contains a single `grok` binary. See the repository
+[Releases](https://github.com/happyfeetw/grok-cli/releases) page.
+
 ### HTTP proxies
 
 Shared HTTP clients (API, sampling, uploads, and MCP HTTP transports) honor
