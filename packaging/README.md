@@ -30,6 +30,11 @@ echo '0.1.222' > packaging/VERSION
 node packaging/scripts/sync-version.js
 ```
 
+Before tagging a release, add a Keep a Changelog section for the new version
+in the repo-root [`CHANGELOG.md`](../CHANGELOG.md). The release workflow extracts
+that section into the GitHub Release body
+(`packaging/scripts/extract-changelog.js`).
+
 ## Asset naming (GitHub Releases)
 
 ```text

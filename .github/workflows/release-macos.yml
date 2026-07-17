@@ -145,6 +145,9 @@ jobs:
       arm64_sha: ${{ steps.shas.outputs.arm64_sha }}
       x64_sha: ${{ steps.shas.outputs.x64_sha }}
     steps:
+      # Checkout for CHANGELOG.md (Keep a Changelog → release notes body).
+      - uses: actions/checkout@v4
+
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
@@ -183,50 +186,70 @@ jobs:
           echo "arm64_sha=${ARM64_SHA}" >> "$GITHUB_OUTPUT"
           echo "x64_sha=${X64_SHA}" >> "$GITHUB_OUTPUT"
 
+      - name: Compose release notes from CHANGELOG.md
+        run: |
+          set -euo pipefail
+          VERSION="${{ needs.meta.outputs.version }}"
+          TAG="${{ needs.meta.outputs.tag }}"
+          NOTES_DIR=release-notes
+          mkdir -p "$NOTES_DIR"
+          node packaging/scripts/extract-changelog.js --version "$VERSION" --out "$NOTES_DIR/changes.md"
+          {
+            echo "## grok-cli ${VERSION}"
+            echo
+            echo "Community fork of Grok Build CLI with **system-proxy** enabled"
+            echo "(honors macOS System Settings proxies when env vars are unset)."
+            echo
+            echo "### Changelog"
+            echo
+            cat "$NOTES_DIR/changes.md"
+            echo
+            echo "### Install"
+            echo
+            echo "**npm / bun**"
+            echo '```sh'
+            echo "npm install -g @spikewang/grok-cli"
+            echo "# bun add -g @spikewang/grok-cli"
+            echo "grok-cli --version"
+            echo '```'
+            echo
+            echo "**Homebrew**"
+            echo '```sh'
+            echo "brew tap happyfeetw/grok-cli https://github.com/happyfeetw/grok-cli"
+            echo "brew install grok-cli"
+            echo "grok-cli --version"
+            echo '```'
+            echo
+            echo "**GitHub Release tarball**"
+            echo '```sh'
+            echo "tar -xzf grok-cli-${VERSION}-darwin-arm64.tar.gz   # Apple Silicon"
+            echo "# tar -xzf grok-cli-${VERSION}-darwin-x64.tar.gz  # Intel"
+            echo "install -m 755 grok-cli ~/.local/bin/grok-cli"
+            echo '```'
+            echo
+            echo "### Assets"
+            echo
+            echo "| File | Platform |"
+            echo "|------|----------|"
+            echo "| \`grok-cli-${VERSION}-darwin-arm64.tar.gz\` | macOS Apple Silicon |"
+            echo "| \`grok-cli-${VERSION}-darwin-x64.tar.gz\` | macOS Intel |"
+            echo
+            echo "Each archive contains a single **\`grok-cli\`** binary (not \`grok\`). Checksums: \`*.sha256\`."
+            echo
+            echo "Full history: [CHANGELOG.md](https://github.com/${{ github.repository }}/blob/main/CHANGELOG.md)"
+          } > "$NOTES_DIR/body.md"
+          echo "---- release notes preview ----"
+          cat "$NOTES_DIR/body.md"
+
       - uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ needs.meta.outputs.tag }}
           name: grok-cli ${{ needs.meta.outputs.version }} (macOS)
           draft: false
           prerelease: false
+          # Append auto-generated commit list under the Keep-a-Changelog section.
           generate_release_notes: true
-          body: |
-            ## grok-cli ${{ needs.meta.outputs.version }}
-
-            Community fork of Grok Build CLI with **system-proxy** enabled
-            (honors macOS System Settings proxies when env vars are unset).
-
-            ### Install
-
-            **npm / bun**
-            ```sh
-            npm install -g @spikewang/grok-cli
-            # bun add -g @spikewang/grok-cli
-            grok-cli --version
-            ```
-
-            **Homebrew**
-            ```sh
-            brew tap happyfeetw/grok-cli https://github.com/happyfeetw/grok-cli
-            brew install grok-cli
-            grok-cli --version
-            ```
-
-            **GitHub Release tarball**
-            ```sh
-            tar -xzf grok-cli-${{ needs.meta.outputs.version }}-darwin-arm64.tar.gz   # Apple Silicon
-            # tar -xzf grok-cli-${{ needs.meta.outputs.version }}-darwin-x64.tar.gz  # Intel
-            install -m 755 grok-cli ~/.local/bin/grok-cli
-            ```
-
-            ### Assets
-
-            | File | Platform |
-            |------|----------|
-            | `grok-cli-${{ needs.meta.outputs.version }}-darwin-arm64.tar.gz` | macOS Apple Silicon |
-            | `grok-cli-${{ needs.meta.outputs.version }}-darwin-x64.tar.gz` | macOS Intel |
-
-            Each archive contains a single **`grok-cli`** binary (not `grok`). Checksums: `*.sha256`.
+          body_path: release-notes/body.md
           files: |
             release-assets/**
         env:

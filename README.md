@@ -38,6 +38,7 @@ headlessly for scripting/CI, or embedded in editors via the Agent Client
 Protocol (ACP).
 
 [Install](#install) ·
+[Changelog](CHANGELOG.md) ·
 [Building from source](#building-from-source) ·
 [HTTP proxies](#http-proxies) ·
 [Documentation](#documentation) ·
@@ -66,6 +67,9 @@ the product name **`grok-cli`**.
 
 Version source of truth: [`packaging/VERSION`](packaging/VERSION) (currently
 kept in lockstep with git tags `v*`, npm, and Homebrew).
+
+Release notes for this fork live in [`CHANGELOG.md`](CHANGELOG.md) and are
+copied onto each [GitHub Release](https://github.com/happyfeetw/grok-cli/releases).
 
 ### npm / bun (macOS)
 

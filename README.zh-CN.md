@@ -34,6 +34,7 @@
 **Grok Build** 是 SpaceXAI 的终端 AI 编程助手。它以全屏 TUI 形式运行，能理解代码库、编辑文件、执行命令、检索网页并管理长时间任务——支持交互、无界面（脚本/CI）以及通过 Agent Client Protocol（ACP）嵌入编辑器。
 
 [安装](#安装) ·
+[更新日志](CHANGELOG.md) ·
 [从源码构建](#从源码构建) ·
 [HTTP 代理](#http-代理) ·
 [文档](#文档) ·
@@ -57,6 +58,9 @@
 本仓库是社区 fork（`happyfeetw/grok-cli`）：重新启用了 **system-proxy**，并以 **`grok-cli`** 为产品名提供以 macOS 为主的分发渠道。
 
 版本唯一来源：[`packaging/VERSION`](packaging/VERSION)（与 git tag `v*`、npm、Homebrew 对齐）。
+
+本 fork 的变更说明见 [`CHANGELOG.md`](CHANGELOG.md)，并会同步展示在
+[GitHub Releases](https://github.com/happyfeetw/grok-cli/releases) 页面。
 
 ### npm / bun（macOS）
 

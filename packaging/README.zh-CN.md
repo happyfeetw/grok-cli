@@ -30,6 +30,10 @@ echo '0.1.222' > packaging/VERSION
 node packaging/scripts/sync-version.js
 ```
 
+打 tag 发版前，请在仓库根目录 [`CHANGELOG.md`](../CHANGELOG.md) 为新版本写好
+Keep a Changelog 小节。发布流水线会用
+`packaging/scripts/extract-changelog.js` 把该小节写进 GitHub Release 正文。
+
 ## GitHub Release 资源命名
 
 ```text
