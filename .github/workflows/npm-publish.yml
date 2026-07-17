@@ -1,0 +1,80 @@
+# Publish @spikewang/grok-cli* from an existing GitHub Release (no rebuild).
+#
+# Prerequisites:
+#   - Release assets: grok-cli-<version>-darwin-{arm64,x64}.tar.gz
+#   - Secret NPM_TOKEN (npm Automation or granular publish token for @spikewang)
+#
+# Usage: Actions → "Publish npm" → Run workflow (optional version input)
+
+name: Publish npm
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version (must match packaging/VERSION and the GH release tag without v)"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          registry-url: https://registry.npmjs.org
+
+      - name: Resolve version + download release binaries
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          VERSION="${{ inputs.version }}"
+          if [[ -z "$VERSION" ]]; then
+            VERSION="$(tr -d '[:space:]' < packaging/VERSION)"
+          fi
+          echo "VERSION=${VERSION}" >> "$GITHUB_ENV"
+          FILE_VERSION="$(tr -d '[:space:]' < packaging/VERSION)"
+          if [[ "$VERSION" != "$FILE_VERSION" ]]; then
+            echo "::error::input version ($VERSION) != packaging/VERSION ($FILE_VERSION)"
+            exit 1
+          fi
+
+          mkdir -p /tmp/bins
+          for arch in arm64 x64; do
+            asset="grok-cli-${VERSION}-darwin-${arch}.tar.gz"
+            url="https://github.com/${{ github.repository }}/releases/download/v${VERSION}/${asset}"
+            echo "Downloading ${url}"
+            curl -fsSL -o "/tmp/${asset}" "$url"
+            mkdir -p "/tmp/extract-${arch}"
+            tar -xzf "/tmp/${asset}" -C "/tmp/extract-${arch}"
+            test -f "/tmp/extract-${arch}/grok"
+            cp "/tmp/extract-${arch}/grok" "/tmp/bins/grok-darwin-${arch}"
+            chmod +x "/tmp/bins/grok-darwin-${arch}"
+          done
+          ls -lah /tmp/bins
+
+      - name: Assemble + publish
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          GROK_DARWIN_ARM64: /tmp/bins/grok-darwin-arm64
+          GROK_DARWIN_X64: /tmp/bins/grok-darwin-x64
+        run: |
+          set -euo pipefail
+          if [[ -z "${NPM_TOKEN:-}" ]]; then
+            echo "::error::NPM_TOKEN secret is empty"
+            exit 1
+          fi
+          # Quick auth probe (whoami fails clearly if token/scope is wrong)
+          echo "//registry.npmjs.org/:_authToken=${NPM_TOKEN}" > ~/.npmrc
+          echo "registry=https://registry.npmjs.org/" >> ~/.npmrc
+          npm whoami --registry https://registry.npmjs.org/
+          node packaging/scripts/assemble-npm.js
+          node packaging/scripts/publish-npm.js

@@ -280,7 +280,9 @@ jobs:
 
       - name: Assemble + publish
         env:
+          # setup-node injects NODE_AUTH_TOKEN into its userconfig; set both.
           NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           set -euo pipefail
           if [[ -z "${NPM_TOKEN:-}" ]]; then
@@ -288,12 +290,13 @@ jobs:
             exit 1
           fi
           VERSION="${{ needs.meta.outputs.version }}"
-          ARM=$(find artifacts -path "*darwin-arm64*" -name 'xai-grok-pager' -type f | head -1)
-          X64=$(find artifacts -path "*darwin-x64*" -name 'xai-grok-pager' -type f | head -1)
+          ARM=$(find artifacts -path "*darwin-arm64*" \( -name 'xai-grok-pager' -o -name 'grok' \) -type f | head -1)
+          X64=$(find artifacts -path "*darwin-x64*" \( -name 'xai-grok-pager' -o -name 'grok' \) -type f | head -1)
           echo "ARM=$ARM"
           echo "X64=$X64"
           test -n "$ARM" && test -n "$X64"
           export GROK_DARWIN_ARM64="$ARM"
           export GROK_DARWIN_X64="$X64"
+          npm whoami --registry https://registry.npmjs.org/ || true
           node packaging/scripts/assemble-npm.js
           node packaging/scripts/publish-npm.js
