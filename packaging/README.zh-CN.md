@@ -10,52 +10,52 @@
 | **Homebrew** | `happyfeetw/grok-cli` tap → `grok-cli` | macOS arm64 + x64 |
 | **GitHub Releases** | `grok-cli-<version>-darwin-<arch>.tar.gz` | 仅 macOS |
 
-## 版本唯一来源
+## 版本管理（与上游官方一致）
+
+二进制侧遵循 **官方 Grok Build** 约定：
 
 ```text
-packaging/VERSION
+编译进二进制的 VERSION = 构建时环境变量 GROK_VERSION（若已设置）
+                      | 否则 shipping crate 的 CARGO_PKG_VERSION（本地/开发）
 ```
 
-该文件一行版本号（**不要**带前缀 `v`）是 **唯一的产品版本**，会同步到：
+| 角色 | 位置 | 说明 |
+|------|------|------|
+| 打包用版本源（fork） | [`packaging/VERSION`](VERSION) | 一行，不要 `v` 前缀 |
+| 编译期 stamp | 环境变量 `GROK_VERSION` | **发版 CI 必须设置**（与上游相同） |
+| 未 stamp 回退 | shipping crate 的 `Cargo.toml` `version` | pager-bin / pager / xai-grok-version |
+| npm / formula / tag | `sync-version.js` 写入 | 来自 `packaging/VERSION` |
+| `--version` 展示 | `VERSION_WITH_COMMIT` | `{version} ({git short sha})` |
 
-- npm 的 `package.json`（`packaging/npm/**`，经 `sync-version.js`）
-- Homebrew formula（`Formula/grok-cli.rb`）
-- Git tag（`v` + 版本，如 `v0.1.223`）
-- GitHub Release 资源文件名
-- CLI 二进制（`grok-cli --version`，由 build script 注入）
-
-### 产品版本 vs Cargo crate 版本
-
-本仓库主体是 Rust monorepo，各 crate 的 `Cargo.toml` `version`（如
-`0.1.220-alpha.4`、`0.2.0-dev`）只服务 crate 自身演进，**不是**用户可见的
-CLI / npm 版本。
-
-编译期解析见
-`crates/codegen/xai-grok-version/product_version_for_build.rs`：
-
-1. 环境变量 `GROK_VERSION`（发版 CI 显式设置）
-2. 否则读 `packaging/VERSION`
-3. 否则 `0.0.0-dev`（**绝不用** `CARGO_PKG_VERSION` 冒充产品版本）
-
-发版 CI 另设 `GROK_RELEASE_BUILD=1`：若拿不到 packaging 版本则 **直接失败**。
-
-升级版本：
+升级并对齐打包面 + Cargo shipping crates：
 
 ```sh
-echo '0.1.224' > packaging/VERSION
+echo '0.1.225' > packaging/VERSION
 node packaging/scripts/sync-version.js
 ```
 
-打 tag 发版前，请在仓库根目录 [`CHANGELOG.md`](../CHANGELOG.md) 为新版本写好
-Keep a Changelog 小节。发布流水线会用
-`packaging/scripts/extract-changelog.js` 把该小节写进 GitHub Release 正文。
-
-本地（有 `packaging/VERSION` 时会自动 stamp）：
+发版 CI：
 
 ```sh
+export GROK_VERSION="$(tr -d '[:space:]' < packaging/VERSION)"
+cargo build -p xai-grok-pager-bin --release
+```
+
+本地与发版相同 stamp：
+
+```sh
+export GROK_VERSION="$(tr -d '[:space:]' < packaging/VERSION)"
 cargo build -p xai-grok-pager-bin --release
 ./target/release/xai-grok-pager --version
 ```
+
+未设置 `GROK_VERSION` 时，`--version` 使用 shipping crate 的 Cargo 版本
+（由 `sync-version.js` 与 `packaging/VERSION` 对齐）加上 git short SHA。
+
+### 更新日志
+
+打 tag 前在根目录 [`CHANGELOG.md`](../CHANGELOG.md) 写好对应版本小节。
+流水线用 `extract-changelog.js` 写入 GitHub Release 正文。
 
 ## GitHub Release 资源命名
 
@@ -71,24 +71,15 @@ grok-cli-<version>-darwin-x64.tar.gz.sha256
 ## 本地干跑
 
 ```sh
-# 本机 cargo build --release 之后
-export GROK_DARWIN_ARM64=target/release/xai-grok-pager   # Apple Silicon 示例
+export GROK_DARWIN_ARM64=target/release/xai-grok-pager
 node packaging/scripts/sync-version.js
-node packaging/scripts/assemble-npm.js
+node packaging/scripts/assemble-npm.js --darwin-only
 ```
 
 ## 发布（CI）
-
-推送与 `packaging/VERSION` 一致的 tag：
 
 ```sh
 VERSION=$(cat packaging/VERSION)
 git tag -a "v${VERSION}" -m "Release v${VERSION}"
 git push origin "v${VERSION}"
 ```
-
-CI 将：构建 macOS 二进制 → 创建 GitHub Release → 更新 Homebrew formula →
-`npm publish`（需要仓库 Secret `NPM_TOKEN`）。
-
-仅从已有 Release 发布 npm（不重新编译）可使用工作流
-[Publish npm](../.github/workflows/npm-publish.yml)。

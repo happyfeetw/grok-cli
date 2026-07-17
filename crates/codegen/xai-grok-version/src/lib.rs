@@ -1,23 +1,26 @@
-//! Product version for the Grok CLI binary and packaging.
+//! Installed grok CLI version, lockstepped with shipping binaries.
 //!
-//! # Source of truth
+//! # Upstream contract (official Grok Build)
 //!
-//! User-facing / packaging version comes from **`packaging/VERSION`** (or the
-//! `GROK_VERSION` env override at compile time). It is **not** this crate's
-//! `Cargo.toml` `version` field and **not** `xai-grok-pager-bin`'s crate
-//! version — those track monorepo/crate evolution independently.
+//! ```text
+//! VERSION = GROK_VERSION (compile-time env)  if set at build
+//!         | CARGO_PKG_VERSION                otherwise (local/dev)
+//! ```
 //!
-//! The build script always injects `GROK_VERSION` via `cargo:rustc-env`.
+//! Release pipelines must export `GROK_VERSION` so the binary identity matches
+//! the npm / install-channel version. Unstamped developer builds intentionally
+//! report this crate's Cargo version (or the binary package's, via
+//! `VERSION_WITH_COMMIT` in the pager build scripts).
 
 use semver::Version;
 
-/// Runtime override for tests (does not change the compiled-in default).
 pub const TEST_VERSION_ENV: &str = "GROK_TEST_VERSION";
 
-/// Compiled-in product version (`packaging/VERSION` or `GROK_VERSION` at build).
-///
-/// Always present: the build script sets `GROK_VERSION` (or `0.0.0-dev`).
-pub const VERSION: &str = env!("GROK_VERSION");
+/// Compiled-in version: release stamp (`GROK_VERSION`) or crate fallback.
+pub const VERSION: &str = match option_env!("GROK_VERSION") {
+    Some(v) => v,
+    None => env!("CARGO_PKG_VERSION"),
+};
 
 /// [`TEST_VERSION_ENV`] override first, then [`VERSION`]. Trimmed so
 /// non-semver-aware callers can pass the result straight into parsing.
@@ -81,11 +84,5 @@ mod tests {
         // display_version uses compiled VERSION — just verify the label appends
         assert_eq!(display_version(""), VERSION);
         assert!(display_version(" [stable]").ends_with("[stable]"));
-        // Product VERSION must look like packaging semver (or 0.0.0-dev), not
-        // an arbitrary unrelated crate string without digits.
-        assert!(
-            VERSION.chars().any(|c| c.is_ascii_digit()),
-            "VERSION should be a product version stamp, got {VERSION:?}"
-        );
     }
 }

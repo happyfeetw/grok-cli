@@ -100,34 +100,26 @@ jobs:
         with:
           shared-key: release-macos-${{ matrix.target }}
 
-      # Product version SSOT: packaging/VERSION (never Cargo crate versions).
-      # GROK_VERSION     — explicit stamp (auditable in logs)
-      # GROK_RELEASE_BUILD — fail closed if packaging/VERSION / env missing
-      # Shared resolver: crates/codegen/xai-grok-version/product_version_for_build.rs
+      # Official contract: stamp GROK_VERSION at compile time (same as upstream).
+      # packaging/VERSION is this fork's packaging SSOT → becomes GROK_VERSION here
+      # so --version matches npm / tag / Homebrew. Unstamped local builds fall
+      # back to CARGO_PKG_VERSION (pager-bin crate version).
       - name: Build release binary
         env:
           GROK_VERSION: ${{ needs.meta.outputs.version }}
-          GROK_RELEASE_BUILD: "1"
         run: |
           set -euo pipefail
-          echo "GROK_VERSION=${GROK_VERSION} GROK_RELEASE_BUILD=${GROK_RELEASE_BUILD}"
+          echo "GROK_VERSION=${GROK_VERSION}"
           test -n "${GROK_VERSION}"
           test "$(tr -d '[:space:]' < packaging/VERSION)" = "${GROK_VERSION}"
           cargo build -p xai-grok-pager-bin --release --target "${{ matrix.target }}"
           BIN="target/${{ matrix.target }}/release/xai-grok-pager"
           test -f "$BIN"
-          # Sanity: packaging version must be baked into the binary (works for
-          # cross-compiles too — no need to execute the foreign arch).
           if ! strings "$BIN" | grep -F "${GROK_VERSION}" >/dev/null; then
-            echo "::error::binary does not contain product version ${GROK_VERSION}"
+            echo "::error::binary does not contain GROK_VERSION=${GROK_VERSION}"
             exit 1
           fi
-          # Must not still embed the historical Cargo alpha used as a false product id.
-          if strings "$BIN" | grep -E '0\.1\.220-alpha' >/dev/null; then
-            echo "::warning::binary still contains 0.1.220-alpha* strings (may be unrelated); check --version"
-          fi
           echo "version stamp ok: ${GROK_VERSION}"
-          # On native arch, also check the user-facing --version line.
           if "$BIN" --version >/tmp/grok-ver.txt 2>&1; then
             cat /tmp/grok-ver.txt
             grep -F "${GROK_VERSION}" /tmp/grok-ver.txt \

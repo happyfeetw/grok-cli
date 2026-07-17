@@ -1,21 +1,16 @@
-//! Stamp the **product** version into this crate.
+//! Official-style version stamp (upstream Grok Build contract).
 //!
-//! See [`product_version_for_build`] for the SSOT rules (`packaging/VERSION`,
-//! never Cargo crate versions for user-facing CLI identity).
-
-#[path = "product_version_for_build.rs"]
-mod product_version_for_build;
+//! Release / packaging builds set process env `GROK_VERSION`. When present we
+//! forward it with `cargo:rustc-env` so `option_env!("GROK_VERSION")` in
+//! `lib.rs` resolves. When absent, `lib.rs` falls back to `CARGO_PKG_VERSION`
+//! (local/dev builds).
 
 fn main() {
     println!("cargo:rerun-if-env-changed=GROK_VERSION");
-    println!("cargo:rerun-if-env-changed=GROK_RELEASE_BUILD");
-    println!("cargo:rerun-if-env-changed=GROK_REQUIRE_PRODUCT_VERSION");
-    println!("cargo:rerun-if-changed=packaging/VERSION");
-    // Relative path from this crate to the monorepo packaging file (best-effort
-    // for cargo's change tracking; resolve still walks parents).
-    println!("cargo:rerun-if-changed=../../../packaging/VERSION");
-
-    let (version, _source) = product_version_for_build::resolve_product_version_for_build();
-    // Always set — `lib.rs` uses `env!("GROK_VERSION")` with no Cargo fallback.
-    println!("cargo:rustc-env=GROK_VERSION={version}");
+    if let Ok(v) = std::env::var("GROK_VERSION") {
+        let t = v.trim();
+        if !t.is_empty() {
+            println!("cargo:rustc-env=GROK_VERSION={t}");
+        }
+    }
 }

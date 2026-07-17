@@ -1,7 +1,14 @@
 #!/usr/bin/env node
 /**
- * Stamp packaging/VERSION into npm package.json files and Formula/grok-cli.rb
- * placeholders that use {{VERSION}}.
+ * Stamp packaging/VERSION into packaging surfaces and the shipping Cargo
+ * packages (official-style: binary crate version aligns with product/npm).
+ *
+ * - packaging/npm package.json files
+ * - Formula/grok-cli.rb (version + URL placeholders)
+ * - xai-grok-pager-bin / xai-grok-pager / xai-grok-version Cargo.toml
+ *   (unstamped local builds fall back to CARGO_PKG_VERSION)
+ *
+ * Release CI still sets GROK_VERSION at compile time (upstream contract).
  *
  * Usage: node packaging/scripts/sync-version.js
  */
@@ -44,12 +51,10 @@ const formulaPath = path.join(root, 'Formula', 'grok-cli.rb');
 if (fs.existsSync(formulaPath)) {
   let formula = fs.readFileSync(formulaPath, 'utf8');
   formula = formula.replace(/version\s+"[^"]+"/, `version "${version}"`);
-  // URL version segments: /download/vX.Y.Z/grok-cli-X.Y.Z-darwin-
   formula = formula.replace(
     /releases\/download\/v[^/]+\/grok-cli-[^-]+-darwin-/g,
     `releases/download/v${version}/grok-cli-${version}-darwin-`,
   );
-  // Also handle urls that already use full asset names without prior rewrite
   formula = formula.replace(
     /grok-cli-\d+\.\d+\.\d+(?:[.-][0-9A-Za-z.-]+)?-darwin-/g,
     `grok-cli-${version}-darwin-`,
@@ -60,6 +65,26 @@ if (fs.existsSync(formulaPath)) {
   );
   fs.writeFileSync(formulaPath, formula);
   console.log(`[sync-version] Formula/grok-cli.rb -> ${version}`);
+}
+
+// Shipping crates: keep Cargo version aligned with product/npm so unstamped
+// local builds (no GROK_VERSION) report the same semver as packaging.
+const cargoTomls = [
+  'crates/codegen/xai-grok-pager-bin/Cargo.toml',
+  'crates/codegen/xai-grok-pager/Cargo.toml',
+  'crates/codegen/xai-grok-version/Cargo.toml',
+];
+for (const rel of cargoTomls) {
+  const p = path.join(root, rel);
+  if (!fs.existsSync(p)) continue;
+  const before = fs.readFileSync(p, 'utf8');
+  const after = before.replace(/^version\s*=\s*"[^"]+"/m, `version = "${version}"`);
+  if (after === before) {
+    console.warn(`[sync-version] no version field updated in ${rel}`);
+    continue;
+  }
+  fs.writeFileSync(p, after);
+  console.log(`[sync-version] ${rel} -> ${version}`);
 }
 
 console.log(`[sync-version] version=${version}`);

@@ -14,6 +14,17 @@ packaging, branding, and distribution.
 
 ## [Unreleased]
 
+## [0.1.225] - 2026-07-18
+
+### Changed
+
+- Align product versioning with **upstream Grok Build**: compile-time
+  `GROK_VERSION` stamp, otherwise `CARGO_PKG_VERSION` (shipping crates).
+- Remove the fork-only packaging-file-as-binary-SSOT path. `packaging/VERSION`
+  stays the packaging SSOT and is exported as `GROK_VERSION` on release CI;
+  `sync-version.js` also aligns shipping crate Cargo.toml versions for
+  unstamped local builds.
+
 ## [0.1.224] - 2026-07-18
 
 ### Changed
@@ -83,7 +94,8 @@ packaging, branding, and distribution.
 - Build/CI robustness around `protoc` paths (historical Windows matrix work;
   current release target is macOS-only).
 
-[Unreleased]: https://github.com/happyfeetw/grok-cli/compare/v0.1.224...HEAD
+[Unreleased]: https://github.com/happyfeetw/grok-cli/compare/v0.1.225...HEAD
+[0.1.225]: https://github.com/happyfeetw/grok-cli/compare/v0.1.224...v0.1.225
 [0.1.224]: https://github.com/happyfeetw/grok-cli/compare/v0.1.223...v0.1.224
 [0.1.223]: https://github.com/happyfeetw/grok-cli/compare/v0.1.222...v0.1.223
 [0.1.222]: https://github.com/happyfeetw/grok-cli/compare/v0.1.221...v0.1.222
