@@ -16,17 +16,33 @@
 packaging/VERSION
 ```
 
-该文件一行版本号（**不要**带前缀 `v`）会同步到：
+该文件一行版本号（**不要**带前缀 `v`）是 **唯一的产品版本**，会同步到：
 
-- npm 的 `package.json`（`packaging/npm/**`）
+- npm 的 `package.json`（`packaging/npm/**`，经 `sync-version.js`）
 - Homebrew formula（`Formula/grok-cli.rb`）
-- Git tag（`v` + 版本，如 `v0.1.221`）
+- Git tag（`v` + 版本，如 `v0.1.223`）
 - GitHub Release 资源文件名
+- CLI 二进制（`grok-cli --version`，由 build script 注入）
+
+### 产品版本 vs Cargo crate 版本
+
+本仓库主体是 Rust monorepo，各 crate 的 `Cargo.toml` `version`（如
+`0.1.220-alpha.4`、`0.2.0-dev`）只服务 crate 自身演进，**不是**用户可见的
+CLI / npm 版本。
+
+编译期解析见
+`crates/codegen/xai-grok-version/product_version_for_build.rs`：
+
+1. 环境变量 `GROK_VERSION`（发版 CI 显式设置）
+2. 否则读 `packaging/VERSION`
+3. 否则 `0.0.0-dev`（**绝不用** `CARGO_PKG_VERSION` 冒充产品版本）
+
+发版 CI 另设 `GROK_RELEASE_BUILD=1`：若拿不到 packaging 版本则 **直接失败**。
 
 升级版本：
 
 ```sh
-echo '0.1.222' > packaging/VERSION
+echo '0.1.224' > packaging/VERSION
 node packaging/scripts/sync-version.js
 ```
 
@@ -34,12 +50,11 @@ node packaging/scripts/sync-version.js
 Keep a Changelog 小节。发布流水线会用
 `packaging/scripts/extract-changelog.js` 把该小节写进 GitHub Release 正文。
 
-发布 CI 会将 `GROK_VERSION` 设为 `packaging/VERSION` 再编译，使
-`grok-cli --version` 与 npm / tag / Homebrew 版本一致。本地复现：
+本地（有 `packaging/VERSION` 时会自动 stamp）：
 
 ```sh
-export GROK_VERSION="$(tr -d '[:space:]' < packaging/VERSION)"
 cargo build -p xai-grok-pager-bin --release
+./target/release/xai-grok-pager --version
 ```
 
 ## GitHub Release 资源命名

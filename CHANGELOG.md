@@ -14,6 +14,18 @@ packaging, branding, and distribution.
 
 ## [Unreleased]
 
+## [0.1.224] - 2026-07-18
+
+### Changed
+
+- **Product version SSOT**: user-facing CLI / npm / tag version comes only from
+  `packaging/VERSION` (optional `GROK_VERSION` override). Cargo crate versions
+  are no longer used as a silent fallback for `--version`.
+- Shared build-script resolver
+  (`xai-grok-version/product_version_for_build.rs`) used by the version crate,
+  pager lib, and pager binary; release CI sets `GROK_RELEASE_BUILD=1` to fail
+  closed if the packaging version is missing.
+
 ## [0.1.223] - 2026-07-18
 
 ### Fixed
@@ -71,7 +83,8 @@ packaging, branding, and distribution.
 - Build/CI robustness around `protoc` paths (historical Windows matrix work;
   current release target is macOS-only).
 
-[Unreleased]: https://github.com/happyfeetw/grok-cli/compare/v0.1.223...HEAD
+[Unreleased]: https://github.com/happyfeetw/grok-cli/compare/v0.1.224...HEAD
+[0.1.224]: https://github.com/happyfeetw/grok-cli/compare/v0.1.223...v0.1.224
 [0.1.223]: https://github.com/happyfeetw/grok-cli/compare/v0.1.222...v0.1.223
 [0.1.222]: https://github.com/happyfeetw/grok-cli/compare/v0.1.221...v0.1.222
 [0.1.221]: https://github.com/happyfeetw/grok-cli/releases/tag/v0.1.221
