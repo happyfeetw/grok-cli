@@ -10,6 +10,27 @@
   Grok Build (<code>grok</code>)
 </h1>
 
+<p>
+  <a href="https://linux.do" title="本项目积极参与并认可 LINUX DO 社区">
+    <img
+      src="https://img.shields.io/badge/LINUX%20DO-Community-0a66c2?style=for-the-badge&logo=discourse&logoColor=white"
+      alt="认可 LINUX DO 社区"
+    />
+  </a>
+  <a href="https://www.npmjs.com/package/@spikewang/grok-cli">
+    <img
+      src="https://img.shields.io/npm/v/@spikewang/grok-cli?style=for-the-badge&logo=npm&logoColor=white"
+      alt="npm @spikewang/grok-cli"
+    />
+  </a>
+  <a href="LICENSE">
+    <img
+      src="https://img.shields.io/badge/License-Apache%202.0-green?style=for-the-badge"
+      alt="Apache-2.0"
+    />
+  </a>
+</p>
+
 **Grok Build** is SpaceXAI's terminal-based AI coding agent. It runs as a
 full-screen TUI that understands your codebase, edits files, executes shell
 commands, searches the web, and manages long-running tasks — interactively,
@@ -29,8 +50,14 @@ Protocol (ACP).
 
 **Learn more about Grok Build at [x.ai/cli](https://x.ai/cli)**
 
-This repository contains the Rust source for the `grok` CLI/TUI and its agent
-runtime. It is synced periodically from the SpaceXAI monorepo.
+This repository is a **community fork** of the open-source Grok Build tree
+(upstream: [xai-org/grok-build](https://github.com/xai-org/grok-build)), with
+extra packaging and system-proxy fixes. Contributions are welcome.
+
+<p>
+  <strong>本项目积极参与并认可
+  <a href="https://linux.do">LINUX DO</a> 社区</strong>
+</p>
 
 </div>
 
@@ -191,8 +218,13 @@ cargo fmt --all               # rustfmt.toml at the repo root
 
 ## Contributing
 
-> [!NOTE]
-> External contributions are not accepted. See [`CONTRIBUTING.md`](CONTRIBUTING.md).
+**External contributions are welcome.** Bug reports, docs fixes, packaging
+improvements, and feature PRs are all appreciated.
+
+Please read [`CONTRIBUTING.md`](CONTRIBUTING.md) for the workflow (issues, PR
+expectations, coding style, and licensing of contributions).
+
+This project acknowledges the [LINUX DO](https://linux.do) community.
 
 ## License
 
