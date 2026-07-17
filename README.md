@@ -10,13 +10,11 @@
   Grok Build (<code>grok</code>)
 </h1>
 
+<p align="center">
+  <a href="https://linux.do"><img src="https://shorturl.at/ggSqS" alt="LINUX DO" /></a>
+</p>
+
 <p>
-  <a href="https://linux.do" title="本项目积极参与并认可 LINUX DO 社区">
-    <img
-      src="https://img.shields.io/badge/LINUX%20DO-Community-0a66c2?style=for-the-badge&logo=discourse&logoColor=white"
-      alt="认可 LINUX DO 社区"
-    />
-  </a>
   <a href="https://www.npmjs.com/package/@spikewang/grok-cli">
     <img
       src="https://img.shields.io/npm/v/@spikewang/grok-cli?style=for-the-badge&logo=npm&logoColor=white"
