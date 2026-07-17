@@ -3,12 +3,13 @@
 // platform package and exec it.
 //
 // Priority:
-//   1. ~/.grok-cli/bin/grok-cli     (postinstall canonical symlink)
+//   1. ~/.grok/bin/grok-cli     (postinstall canonical symlink; same home as official grok)
 //   2. @spikewang/grok-cli-<plat>/bin/grok-cli
 //   3. same path with .br (brotli) — decompress on first use
 //
 // The command is intentionally `grok-cli` (not `grok`) so it does not collide
-// with the official SpaceXAI / xAI `grok` installer.
+// with the official SpaceXAI / xAI `grok` command. Data/home stays under ~/.grok
+// for compatibility with the official layout (auth, config, etc.).
 const { spawn } = require('child_process');
 const path = require('path');
 const fs = require('fs');
@@ -17,7 +18,7 @@ const zlib = require('zlib');
 
 const pkgName = '@spikewang/grok-cli';
 const BIN_NAME = 'grok-cli';
-const CANONICAL_DIR = path.join(os.homedir(), '.grok-cli', 'bin');
+const CANONICAL_DIR = path.join(os.homedir(), '.grok', 'bin');
 const CANONICAL_PATH = path.join(CANONICAL_DIR, BIN_NAME);
 
 function readLocalVersion() {

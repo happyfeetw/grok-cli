@@ -1,6 +1,7 @@
 #!/usr/bin/env node
-// Install the platform binary into ~/.grok-cli/bin/grok-cli-<version> + symlink grok-cli.
-// Uses a separate home dir from the official `grok` installer (~/.grok).
+// Install the platform binary into ~/.grok/bin/grok-cli-<version> + symlink grok-cli.
+// Same ~/.grok home as the official installer (auth/config compatible); only the
+// command name differs (`grok-cli` vs `grok`) so PATH entries do not collide.
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
@@ -8,7 +9,7 @@ const zlib = require('zlib');
 
 const pkgName = '@spikewang/grok-cli';
 const BIN_NAME = 'grok-cli';
-const CANONICAL_DIR = path.join(os.homedir(), '.grok-cli', 'bin');
+const CANONICAL_DIR = path.join(os.homedir(), '.grok', 'bin');
 const key = `${process.platform}-${process.arch}`;
 const SUPPORTED = new Set(['darwin-arm64', 'darwin-x64']);
 
