@@ -54,9 +54,17 @@ jobs:
             curl -fsSL -o "/tmp/${asset}" "$url"
             mkdir -p "/tmp/extract-${arch}"
             tar -xzf "/tmp/${asset}" -C "/tmp/extract-${arch}"
-            test -f "/tmp/extract-${arch}/grok"
-            cp "/tmp/extract-${arch}/grok" "/tmp/bins/grok-darwin-${arch}"
-            chmod +x "/tmp/bins/grok-darwin-${arch}"
+            # Prefer grok-cli (current); accept legacy `grok` payload from older releases.
+            if [[ -f "/tmp/extract-${arch}/grok-cli" ]]; then
+              BIN="/tmp/extract-${arch}/grok-cli"
+            elif [[ -f "/tmp/extract-${arch}/grok" ]]; then
+              BIN="/tmp/extract-${arch}/grok"
+            else
+              echo "::error::archive missing grok-cli (or legacy grok) binary"
+              exit 1
+            fi
+            cp "$BIN" "/tmp/bins/grok-cli-darwin-${arch}"
+            chmod +x "/tmp/bins/grok-cli-darwin-${arch}"
           done
           ls -lah /tmp/bins
 
@@ -64,8 +72,8 @@ jobs:
         env:
           NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-          GROK_DARWIN_ARM64: /tmp/bins/grok-darwin-arm64
-          GROK_DARWIN_X64: /tmp/bins/grok-darwin-x64
+          GROK_DARWIN_ARM64: /tmp/bins/grok-cli-darwin-arm64
+          GROK_DARWIN_X64: /tmp/bins/grok-cli-darwin-x64
         run: |
           set -euo pipefail
           if [[ -z "${NPM_TOKEN:-}" ]]; then

@@ -90,7 +90,7 @@ cargo fmt --all
 
 - 操作系统与架构（如 macOS 15 arm64）
 - 安装方式（`npm`、Homebrew、Release tar、源码）
-- 版本（`grok --version` / 包版本）
+- 版本（`grok-cli --version` / 包版本）
 - 复现步骤、期望与实际行为
 - 相关日志（打码 token 与个人路径）
 

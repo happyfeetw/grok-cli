@@ -74,9 +74,11 @@ npm install -g @spikewang/grok-cli
 # or
 bun add -g @spikewang/grok-cli
 
-grok --version    # primary command
-grok-cli --version  # alias
+grok-cli --version
 ```
+
+The installed command is **`grok-cli`** (not `grok`), so it will not replace
+or shadow the official SpaceXAI/xAI `grok` binary.
 
 Publishes only **macOS** optional binaries:
 
@@ -91,7 +93,7 @@ Publishes only **macOS** optional binaries:
 ```sh
 brew tap happyfeetw/grok-cli https://github.com/happyfeetw/grok-cli
 brew install grok-cli
-grok --version
+grok-cli --version
 ```
 
 Formula: [`Formula/grok-cli.rb`](Formula/grok-cli.rb) (sha256 updated by the
@@ -106,11 +108,11 @@ grok-cli-<version>-darwin-arm64.tar.gz
 grok-cli-<version>-darwin-x64.tar.gz
 ```
 
-Each archive contains a single `grok` binary (+ matching `.sha256` files).
+Each archive contains a single **`grok-cli`** binary (+ matching `.sha256` files).
 
 ```sh
 tar -xzf grok-cli-<version>-darwin-arm64.tar.gz
-install -m 755 grok ~/.local/bin/grok
+install -m 755 grok-cli ~/.local/bin/grok-cli
 ```
 
 See [Releases](https://github.com/happyfeetw/grok-cli/releases).
@@ -142,12 +144,12 @@ cargo build -p xai-grok-pager-bin --release  # release binary: target/release/xa
 cargo check -p xai-grok-pager-bin            # fast validation
 ```
 
-The binary artifact is named `xai-grok-pager`; official installs ship it as
-`grok`. To install a source build under that name:
+The cargo binary artifact is named `xai-grok-pager`. This fork installs it as
+**`grok-cli`** so it stays distinct from the official `grok` command:
 
 ```sh
 mkdir -p ~/.local/bin
-install -m 755 target/release/xai-grok-pager ~/.local/bin/grok
+install -m 755 target/release/xai-grok-pager ~/.local/bin/grok-cli
 ```
 
 Make sure `~/.local/bin` is on your `PATH`. On first launch it opens your

@@ -1,12 +1,14 @@
 #!/usr/bin/env node
-// Install the platform binary into ~/.grok/bin/grok-<version> + symlink grok.
+// Install the platform binary into ~/.grok-cli/bin/grok-cli-<version> + symlink grok-cli.
+// Uses a separate home dir from the official `grok` installer (~/.grok).
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
 const zlib = require('zlib');
 
 const pkgName = '@spikewang/grok-cli';
-const CANONICAL_DIR = path.join(os.homedir(), '.grok', 'bin');
+const BIN_NAME = 'grok-cli';
+const CANONICAL_DIR = path.join(os.homedir(), '.grok-cli', 'bin');
 const key = `${process.platform}-${process.arch}`;
 const SUPPORTED = new Set(['darwin-arm64', 'darwin-x64']);
 
@@ -42,8 +44,8 @@ if (!platformDir) {
   process.exit(0);
 }
 
-const brPath = path.join(platformDir, 'bin', 'grok.br');
-const rawPath = path.join(platformDir, 'bin', 'grok');
+const brPath = path.join(platformDir, 'bin', `${BIN_NAME}.br`);
+const rawPath = path.join(platformDir, 'bin', BIN_NAME);
 let vendored = null;
 if (fs.existsSync(brPath)) {
   const decompressed = zlib.brotliDecompressSync(fs.readFileSync(brPath));
@@ -63,9 +65,9 @@ if (!vendored) {
 }
 
 fs.mkdirSync(CANONICAL_DIR, { recursive: true });
-const versionedName = `grok-${version}`;
+const versionedName = `${BIN_NAME}-${version}`;
 const versionedPath = path.join(CANONICAL_DIR, versionedName);
-const canonicalPath = path.join(CANONICAL_DIR, 'grok');
+const canonicalPath = path.join(CANONICAL_DIR, BIN_NAME);
 
 if (!fs.existsSync(versionedPath)) {
   const tmp = `${versionedPath}.tmp.${process.pid}`;
@@ -82,3 +84,4 @@ fs.symlinkSync(versionedName, tmpLink);
 fs.renameSync(tmpLink, canonicalPath);
 
 console.log(`${pkgName}: installed ${canonicalPath} -> ${versionedName}`);
+console.log(`${pkgName}: run \`${BIN_NAME}\` (not \`grok\`) to avoid clashing with the official CLI.`);

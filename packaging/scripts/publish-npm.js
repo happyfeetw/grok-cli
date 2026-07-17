@@ -73,7 +73,7 @@ const written = [rootNpmrc];
 for (const name of order) {
   const dir = path.join(npmRoot, name);
   if (name !== 'grok-cli') {
-    const br = path.join(dir, 'bin', 'grok.br');
+    const br = path.join(dir, 'bin', 'grok-cli.br');
     if (!fs.existsSync(br)) {
       console.error(`[publish-npm] missing ${br}; run assemble-npm.js first`);
       process.exit(1);

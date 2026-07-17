@@ -75,14 +75,14 @@ async function main() {
     {
       platform: 'darwin',
       arch: 'arm64',
-      binName: 'grok',
+      binName: 'grok-cli',
       envVar: 'GROK_DARWIN_ARM64',
       defaultSource: path.join(root, 'target', 'aarch64-apple-darwin', 'release', 'xai-grok-pager'),
     },
     {
       platform: 'darwin',
       arch: 'x64',
-      binName: 'grok',
+      binName: 'grok-cli',
       envVar: 'GROK_DARWIN_X64',
       defaultSource: path.join(root, 'target', 'x86_64-apple-darwin', 'release', 'xai-grok-pager'),
     },

@@ -1,7 +1,7 @@
 {
     "name": "@spikewang/grok-cli",
-    "version": "0.1.221",
-    "description": "Grok coding agent CLI (fork with macOS/system-proxy support)",
+    "version": "0.1.222",
+    "description": "Grok coding agent CLI fork (command: grok-cli; does not replace official grok)",
     "license": "Apache-2.0",
     "repository": {
         "type": "git",
@@ -12,8 +12,7 @@
         "url": "https://github.com/happyfeetw/grok-cli/issues"
     },
     "bin": {
-        "grok": "bin/grok",
-        "grok-cli": "bin/grok"
+        "grok-cli": "bin/grok-cli"
     },
     "files": [
         "bin/"
@@ -36,8 +35,8 @@
         "node": ">=18"
     },
     "optionalDependencies": {
-        "@spikewang/grok-cli-darwin-arm64": "0.1.221",
-        "@spikewang/grok-cli-darwin-x64": "0.1.221"
+        "@spikewang/grok-cli-darwin-arm64": "0.1.222",
+        "@spikewang/grok-cli-darwin-x64": "0.1.222"
     },
     "keywords": [
         "grok",

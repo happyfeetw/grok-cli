@@ -65,9 +65,11 @@ npm install -g @spikewang/grok-cli
 # 或
 bun add -g @spikewang/grok-cli
 
-grok --version      # 主命令
-grok-cli --version  # 别名
+grok-cli --version
 ```
+
+安装后的命令是 **`grok-cli`**（不是 `grok`），不会覆盖或抢占官方 SpaceXAI/xAI
+的 `grok` 命令。
 
 当前仅发布 **macOS** 平台可选依赖：
 
@@ -82,7 +84,7 @@ grok-cli --version  # 别名
 ```sh
 brew tap happyfeetw/grok-cli https://github.com/happyfeetw/grok-cli
 brew install grok-cli
-grok --version
+grok-cli --version
 ```
 
 Formula：[`Formula/grok-cli.rb`](Formula/grok-cli.rb)（sha256 由发布流水线更新）。
@@ -96,11 +98,11 @@ grok-cli-<version>-darwin-arm64.tar.gz
 grok-cli-<version>-darwin-x64.tar.gz
 ```
 
-每个归档内含单个 `grok` 可执行文件（以及对应的 `.sha256`）。
+每个归档内含单个 **`grok-cli`** 可执行文件（以及对应的 `.sha256`）。
 
 ```sh
 tar -xzf grok-cli-<version>-darwin-arm64.tar.gz
-install -m 755 grok ~/.local/bin/grok
+install -m 755 grok-cli ~/.local/bin/grok-cli
 ```
 
 参见 [Releases](https://github.com/happyfeetw/grok-cli/releases)。
@@ -128,11 +130,12 @@ cargo build -p xai-grok-pager-bin --release  # 产物：target/release/xai-grok-
 cargo check -p xai-grok-pager-bin            # 快速校验
 ```
 
-产物名为 `xai-grok-pager`；官方安装名是 `grok`。源码构建可这样安装：
+Cargo 产物名为 `xai-grok-pager`。本 fork 安装为 **`grok-cli`**，与官方 `grok`
+命令区分：
 
 ```sh
 mkdir -p ~/.local/bin
-install -m 755 target/release/xai-grok-pager ~/.local/bin/grok
+install -m 755 target/release/xai-grok-pager ~/.local/bin/grok-cli
 ```
 
 请确保 `~/.local/bin` 在 `PATH` 中。首次启动会打开浏览器完成登录——见

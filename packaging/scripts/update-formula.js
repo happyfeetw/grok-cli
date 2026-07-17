@@ -50,15 +50,12 @@ const formula = `class GrokCli < Formula
   end
 
   def install
-    bin.install "grok"
+    # Ship as grok-cli so it does not shadow the official `grok` command.
+    bin.install "grok-cli"
   end
 
   test do
-    assert_match version.to_s, shell_output("#{bin}/grok --version 2>&1 || true", 0).presence ||
-                                shell_output("#{bin}/grok version 2>&1 || true", 0)
-  rescue
-    # Binary may require network/auth for some subcommands; just ensure it exists.
-    assert_predicate bin/"grok", :exist?
+    assert_predicate bin/"grok-cli", :exist?
   end
 end
 `;

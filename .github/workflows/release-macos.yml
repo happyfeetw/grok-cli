@@ -8,7 +8,8 @@
 #   3. Commit Formula/grok-cli.rb with real sha256 to main
 #   4. npm publish @spikewang/grok-cli* when NPM_TOKEN is configured
 #
-# Archive payload: single binary named `grok`
+# Archive payload: single binary named `grok-cli` (not `grok`, to avoid
+# colliding with the official SpaceXAI/xAI CLI).
 
 name: Release macOS
 
@@ -30,7 +31,7 @@ env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
   PRODUCT: grok-cli
-  BINARY: grok
+  BINARY: grok-cli
 
 jobs:
   meta:
@@ -201,20 +202,21 @@ jobs:
             ```sh
             npm install -g @spikewang/grok-cli
             # bun add -g @spikewang/grok-cli
+            grok-cli --version
             ```
 
             **Homebrew**
             ```sh
             brew tap happyfeetw/grok-cli https://github.com/happyfeetw/grok-cli
             brew install grok-cli
-            # or after tap: brew upgrade grok-cli
+            grok-cli --version
             ```
 
             **GitHub Release tarball**
             ```sh
             tar -xzf grok-cli-${{ needs.meta.outputs.version }}-darwin-arm64.tar.gz   # Apple Silicon
             # tar -xzf grok-cli-${{ needs.meta.outputs.version }}-darwin-x64.tar.gz  # Intel
-            install -m 755 grok ~/.local/bin/grok
+            install -m 755 grok-cli ~/.local/bin/grok-cli
             ```
 
             ### Assets
@@ -224,7 +226,7 @@ jobs:
             | `grok-cli-${{ needs.meta.outputs.version }}-darwin-arm64.tar.gz` | macOS Apple Silicon |
             | `grok-cli-${{ needs.meta.outputs.version }}-darwin-x64.tar.gz` | macOS Intel |
 
-            Each archive contains a single `grok` binary. Checksums: `*.sha256`.
+            Each archive contains a single **`grok-cli`** binary (not `grok`). Checksums: `*.sha256`.
           files: |
             release-assets/**
         env:
@@ -290,8 +292,8 @@ jobs:
             exit 1
           fi
           VERSION="${{ needs.meta.outputs.version }}"
-          ARM=$(find artifacts -path "*darwin-arm64*" \( -name 'xai-grok-pager' -o -name 'grok' \) -type f | head -1)
-          X64=$(find artifacts -path "*darwin-x64*" \( -name 'xai-grok-pager' -o -name 'grok' \) -type f | head -1)
+          ARM=$(find artifacts -path "*darwin-arm64*" \( -name 'xai-grok-pager' -o -name 'grok-cli' -o -name 'grok' \) -type f | head -1)
+          X64=$(find artifacts -path "*darwin-x64*" \( -name 'xai-grok-pager' -o -name 'grok-cli' -o -name 'grok' \) -type f | head -1)
           echo "ARM=$ARM"
           echo "X64=$X64"
           test -n "$ARM" && test -n "$X64"

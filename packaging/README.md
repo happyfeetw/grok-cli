@@ -39,7 +39,7 @@ grok-cli-<version>-darwin-x64.tar.gz
 grok-cli-<version>-darwin-x64.tar.gz.sha256
 ```
 
-Each tarball contains a single executable named **`grok`**.
+Each tarball contains a single executable named **`grok-cli`** (not `grok`).
 
 ## Local release dry-run
 

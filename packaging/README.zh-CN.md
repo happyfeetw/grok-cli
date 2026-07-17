@@ -39,7 +39,7 @@ grok-cli-<version>-darwin-x64.tar.gz
 grok-cli-<version>-darwin-x64.tar.gz.sha256
 ```
 
-每个 tar 内含单个可执行文件 **`grok`**。
+每个 tar 内含单个可执行文件 **`grok-cli`**（不是 `grok`）。
 
 ## 本地干跑
 

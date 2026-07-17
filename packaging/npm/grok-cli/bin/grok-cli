@@ -1,11 +1,14 @@
 #!/usr/bin/env node
-// Thin trampoline: resolve the real grok binary from the matching optional
+// Thin trampoline: resolve the real grok-cli binary from the matching optional
 // platform package and exec it.
 //
 // Priority:
-//   1. ~/.grok/bin/grok              (postinstall canonical symlink)
-//   2. @spikewang/grok-cli-<plat>/bin/grok
+//   1. ~/.grok-cli/bin/grok-cli     (postinstall canonical symlink)
+//   2. @spikewang/grok-cli-<plat>/bin/grok-cli
 //   3. same path with .br (brotli) — decompress on first use
+//
+// The command is intentionally `grok-cli` (not `grok`) so it does not collide
+// with the official SpaceXAI / xAI `grok` installer.
 const { spawn } = require('child_process');
 const path = require('path');
 const fs = require('fs');
@@ -13,8 +16,8 @@ const os = require('os');
 const zlib = require('zlib');
 
 const pkgName = '@spikewang/grok-cli';
-const BIN_NAME = 'grok';
-const CANONICAL_DIR = path.join(os.homedir(), '.grok', 'bin');
+const BIN_NAME = 'grok-cli';
+const CANONICAL_DIR = path.join(os.homedir(), '.grok-cli', 'bin');
 const CANONICAL_PATH = path.join(CANONICAL_DIR, BIN_NAME);
 
 function readLocalVersion() {
@@ -56,7 +59,7 @@ function decompressBrotli(brPath, outPath) {
 function bootstrapCanonical(sourceBinPath, version) {
   try {
     fs.mkdirSync(CANONICAL_DIR, { recursive: true });
-    const versionedName = `grok-${version}`;
+    const versionedName = `${BIN_NAME}-${version}`;
     const versionedPath = path.join(CANONICAL_DIR, versionedName);
     if (!fs.existsSync(versionedPath)) {
       const tmpPath = `${versionedPath}.tmp.${process.pid}`;
@@ -108,7 +111,12 @@ function resolveBinary() {
 const execPath = resolveBinary();
 const child = spawn(execPath, process.argv.slice(2), {
   stdio: 'inherit',
-  env: { ...process.env, GROK_MANAGED_BY_NPM: '1', GROK_NPM_PACKAGE: pkgName },
+  env: {
+    ...process.env,
+    GROK_MANAGED_BY_NPM: '1',
+    GROK_NPM_PACKAGE: pkgName,
+    GROK_CLI_COMMAND: BIN_NAME,
+  },
 });
 child.on('exit', (code, signal) => {
   if (signal) process.kill(process.pid, signal);

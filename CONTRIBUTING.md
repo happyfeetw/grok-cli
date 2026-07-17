@@ -101,7 +101,7 @@ Packaging (version, npm, Homebrew) lives under [`packaging/`](packaging/) and
 
 - OS and architecture (e.g. macOS 15 arm64)
 - Install method (`npm`, Homebrew, release tarball, source)
-- Version (`grok --version` / package version)
+- Version (`grok-cli --version` / package version)
 - Steps to reproduce, expected vs actual behavior
 - Relevant logs (redact tokens and personal paths)
 

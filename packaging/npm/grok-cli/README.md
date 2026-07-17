@@ -8,9 +8,12 @@ Grok coding agent CLI (community fork of [xAI Grok Build](https://github.com/xai
 npm install -g @spikewang/grok-cli
 # or
 bun add -g @spikewang/grok-cli
+
+grok-cli --version
 ```
 
-Commands installed: `grok` and `grok-cli` (same binary trampoline).
+The only command installed is **`grok-cli`**. It does **not** provide or replace
+the official `grok` command.
 
 ## Supported platforms
 
@@ -23,8 +26,8 @@ Linux/Windows: not published on this channel yet — build from source or use an
 
 ## Other install channels
 
-- **Homebrew:** `brew install happyfeetw/grok-cli/grok-cli` (see repo README)
-- **GitHub Releases:** `grok-cli-<version>-darwin-arm64.tar.gz` / `…-darwin-x64.tar.gz`
+- **Homebrew:** `brew tap happyfeetw/grok-cli https://github.com/happyfeetw/grok-cli && brew install grok-cli`
+- **GitHub Releases:** `grok-cli-<version>-darwin-arm64.tar.gz` / `…-darwin-x64.tar.gz` (binary name: `grok-cli`)
 
 ## Proxy behavior
 
