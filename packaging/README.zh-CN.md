@@ -34,6 +34,14 @@ node packaging/scripts/sync-version.js
 Keep a Changelog 小节。发布流水线会用
 `packaging/scripts/extract-changelog.js` 把该小节写进 GitHub Release 正文。
 
+发布 CI 会将 `GROK_VERSION` 设为 `packaging/VERSION` 再编译，使
+`grok-cli --version` 与 npm / tag / Homebrew 版本一致。本地复现：
+
+```sh
+export GROK_VERSION="$(tr -d '[:space:]' < packaging/VERSION)"
+cargo build -p xai-grok-pager-bin --release
+```
+
 ## GitHub Release 资源命名
 
 ```text

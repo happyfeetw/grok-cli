@@ -14,10 +14,15 @@ packaging, branding, and distribution.
 
 ## [Unreleased]
 
+## [0.1.223] - 2026-07-18
+
 ### Fixed
 
-- Homebrew formula rewrite script no longer breaks on nested backticks in the
-  template (`packaging/scripts/update-formula.js`).
+- Release CI stamps `GROK_VERSION` from `packaging/VERSION` into the binary so
+  `grok-cli --version` matches the npm / GitHub Release / Homebrew version
+  (previously showed the Cargo crate version, e.g. `0.1.220-alpha.4`).
+- `xai-grok-version` build script injects `GROK_VERSION` via `cargo:rustc-env`
+  and falls back to reading `packaging/VERSION` when the env var is unset.
 
 ## [0.1.222] - 2026-07-17
 
@@ -66,6 +71,7 @@ packaging, branding, and distribution.
 - Build/CI robustness around `protoc` paths (historical Windows matrix work;
   current release target is macOS-only).
 
-[Unreleased]: https://github.com/happyfeetw/grok-cli/compare/v0.1.222...HEAD
+[Unreleased]: https://github.com/happyfeetw/grok-cli/compare/v0.1.223...HEAD
+[0.1.223]: https://github.com/happyfeetw/grok-cli/compare/v0.1.222...v0.1.223
 [0.1.222]: https://github.com/happyfeetw/grok-cli/compare/v0.1.221...v0.1.222
 [0.1.221]: https://github.com/happyfeetw/grok-cli/releases/tag/v0.1.221

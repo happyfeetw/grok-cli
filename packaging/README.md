@@ -35,6 +35,15 @@ in the repo-root [`CHANGELOG.md`](../CHANGELOG.md). The release workflow extract
 that section into the GitHub Release body
 (`packaging/scripts/extract-changelog.js`).
 
+Release CI builds with `GROK_VERSION` set from `packaging/VERSION` so the
+binary’s `grok-cli --version` line matches the package/tag (via
+`xai-grok-version` + `xai-grok-pager-bin` build scripts). Locally:
+
+```sh
+export GROK_VERSION="$(tr -d '[:space:]' < packaging/VERSION)"
+cargo build -p xai-grok-pager-bin --release
+```
+
 ## Asset naming (GitHub Releases)
 
 ```text

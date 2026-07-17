@@ -100,8 +100,34 @@ jobs:
         with:
           shared-key: release-macos-${{ matrix.target }}
 
+      # Bake packaging/VERSION into the binary so `grok-cli --version` matches
+      # the npm/Homebrew/tag version (not Cargo crate versions like 0.1.220-alpha.4).
+      # xai-grok-pager-bin build.rs → VERSION_WITH_COMMIT
+      # xai-grok-version build.rs → option_env!("GROK_VERSION")
       - name: Build release binary
-        run: cargo build -p xai-grok-pager-bin --release --target "${{ matrix.target }}"
+        env:
+          GROK_VERSION: ${{ needs.meta.outputs.version }}
+        run: |
+          set -euo pipefail
+          echo "GROK_VERSION=${GROK_VERSION}"
+          cargo build -p xai-grok-pager-bin --release --target "${{ matrix.target }}"
+          BIN="target/${{ matrix.target }}/release/xai-grok-pager"
+          test -f "$BIN"
+          # Sanity: packaging version must be baked into the binary (works for
+          # cross-compiles too — no need to execute the foreign arch).
+          if ! strings "$BIN" | grep -F "${GROK_VERSION}" >/dev/null; then
+            echo "::error::binary does not contain GROK_VERSION=${GROK_VERSION}"
+            exit 1
+          fi
+          echo "version stamp ok: ${GROK_VERSION}"
+          # On native arch, also check the user-facing --version line.
+          if "$BIN" --version >/tmp/grok-ver.txt 2>&1; then
+            cat /tmp/grok-ver.txt
+            grep -F "${GROK_VERSION}" /tmp/grok-ver.txt \
+              || { echo "::error::--version output missing ${GROK_VERSION}"; exit 1; }
+          else
+            echo "skip exec --version (likely cross-compile for ${{ matrix.target }})"
+          fi
 
       - name: Package tarball + stage binary
         run: |
