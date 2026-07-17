@@ -57,10 +57,22 @@ pub fn user_grok_home() -> Option<PathBuf> {
     resolvable.then(grok_home)
 }
 
-/// Canonical grok application path: `$GROK_HOME/bin/grok` (Unix) or `grok.exe` (Windows).
+/// Canonical application path for this fork: `$GROK_HOME/bin/grok-cli`
+/// (Unix) or `grok-cli.exe` (Windows). Prefers `grok-cli` so restart/update
+/// paths do not pick up an official `grok` symlink in the same directory.
 pub fn grok_application() -> PathBuf {
-    let name = if cfg!(windows) { "grok.exe" } else { "grok" };
-    grok_home().join("bin").join(name)
+    let fork = if cfg!(windows) {
+        "grok-cli.exe"
+    } else {
+        "grok-cli"
+    };
+    let path = grok_home().join("bin").join(fork);
+    if path.exists() {
+        return path;
+    }
+    // Legacy fallback for older fork installs that still used the `grok` name.
+    let legacy = if cfg!(windows) { "grok.exe" } else { "grok" };
+    grok_home().join("bin").join(legacy)
 }
 
 /// System-wide config directory: `/etc/grok/` on Unix, `None` on Windows.

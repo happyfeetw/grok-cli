@@ -10,20 +10,18 @@ use xai_grok_shell::env::GrokBuildEnvironment;
 use xai_grok_shell::util::grok_home::grok_home;
 
 const TTL_SECONDS_BEFORE_AUTO_UPDATE: Duration = Duration::from_secs(60 * 30);
-const NPM_PACKAGE: &str = "@xai-official/grok";
-pub const GH_RELEASE_REPO: &str = "xai-org-shared/grok-build";
+/// Fork npm package (not the official `@xai-official/grok`).
+const NPM_PACKAGE: &str = "@spikewang/grok-cli";
+/// Fork GitHub Releases repository.
+pub const GH_RELEASE_REPO: &str = "happyfeetw/grok-cli";
 
-/// Primary CLI base URL: Cloudflare-fronted x.ai endpoint with edge caching
-/// for binaries and origin-respecting no-cache for channel pointers.
+/// Legacy official CDN base (kept only so older tests that inject fake HTTP
+/// servers against these constants still compile). Runtime "internal"
+/// installs for this fork use GitHub Releases instead — see
+/// `run_install_script` / `fetch_latest_version`.
 pub(crate) const CLI_BASE_URL_PRIMARY: &str = "https://x.ai/cli";
-
-/// Fallback CLI base URL: direct GCS, used when the primary is unreachable
-/// (Cloudflare outage, regional CF egress issue, DNS hijack, etc.).
 pub(crate) const CLI_BASE_URL_FALLBACK: &str =
     "https://storage.googleapis.com/grok-build-public-artifacts/cli";
-
-/// CLI base URLs in preference order. Callers (channel-pointer fetch, binary
-/// download, in-app updater) try each in turn and stop at the first success.
 pub(crate) const CLI_BASE_URLS: &[&str] = &[CLI_BASE_URL_PRIMARY, CLI_BASE_URL_FALLBACK];
 
 /// Minimal configuration the update system needs from the environment.
@@ -237,6 +235,7 @@ async fn fetch_gh_release_latest(exclude_pre: bool) -> Result<String> {
 /// success. Each individual base also retries up to 3 times with exponential
 /// backoff (1s, 2s, 4s) on transient failures before falling through to the
 /// next base.
+#[allow(dead_code)] // fork uses GitHub Releases for non-npm installers
 pub(crate) async fn fetch_gcs_version(channel: &str) -> Result<String> {
     let mut last_err: Option<anyhow::Error> = None;
     for (i, base) in CLI_BASE_URLS.iter().enumerate() {
@@ -345,8 +344,9 @@ async fn fetch_gcs_channel_pointer(channel: &str, base_url: &str) -> Result<Stri
 pub async fn fetch_latest_version(installer: &str, config: &UpdateConfig) -> Result<String> {
     match installer {
         "npm" => fetch_npm_version(&config.channel, config.npm_registry.as_deref()).await,
-        "gh-release" => fetch_gh_release_version(&config.channel).await,
-        _ => fetch_gcs_version(&config.channel).await,
+        // Fork has no x.ai CDN channel pointers; treat internal like gh-release.
+        "gh-release" | "internal" => fetch_gh_release_version(&config.channel).await,
+        _ => fetch_gh_release_version(&config.channel).await,
     }
 }
 
@@ -416,12 +416,11 @@ pub async fn is_version_cache_fresh() -> bool {
 
 pub use xai_grok_version::installed as get_installed_grok_version;
 
-/// Version of the managed grok binary currently on disk, read from the
-/// `~/.grok/bin/grok` symlink target (`../downloads/grok-<version>-<platform>`)
-/// without exec'ing anything.
+/// Version of the managed grok-cli binary currently on disk, read from the
+/// `~/.grok/bin/grok-cli` symlink target without exec'ing anything.
 ///
 /// Concurrent updaters (TUI background download, leader hourly checker,
-/// explicit `grok update`) decide staleness from this instead of their own
+/// explicit `grok-cli update`) decide staleness from this instead of their own
 /// compiled-in version, so a binary another process already installed is
 /// never downloaded a second time.
 ///
@@ -443,7 +442,10 @@ pub fn installed_on_disk_version() -> Option<String> {
         // metadata() follows the symlink: Err means the target is gone
         // (dangling link) and the version it names is not actually on disk.
         std::fs::metadata(&app).ok()?;
-        version_from_versioned_binary_name(target.file_name()?.to_str()?, "grok")
+        let name = target.file_name()?.to_str()?;
+        // Prefer fork naming; fall back to legacy official `grok-…` names.
+        version_from_versioned_binary_name(name, "grok-cli")
+            .or_else(|| version_from_versioned_binary_name(name, "grok"))
     }
     #[cfg(not(unix))]
     {

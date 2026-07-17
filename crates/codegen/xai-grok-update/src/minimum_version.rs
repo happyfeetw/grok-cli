@@ -46,13 +46,13 @@ pub(crate) enum MinimumVersionError {
     },
     #[error(
         "This version of Grok ({current}) is no longer supported. \
-         Run `grok update` to install version {minimum} or later."
+         Run `grok-cli update` to install version {minimum} or later."
     )]
     AutoUpdateDisabled { current: String, minimum: String },
     /// `npm` / `gh` / `internal` GCS — none detected.
     #[error(
         "This version of Grok ({current}) is no longer supported. \
-         Run `grok update` to install version {minimum} or later."
+         Run `grok-cli update` to install version {minimum} or later."
     )]
     NoInstaller { current: String, minimum: String },
     /// `detail` is telemetry-only; omitted from `Display` to avoid stacking
@@ -60,7 +60,7 @@ pub(crate) enum MinimumVersionError {
     #[error(
         "This version of Grok ({current}) is no longer supported, \
          and the update to version {minimum} didn't complete.\n\n\
-         Run `grok update` to try again."
+         Run `grok-cli update` to try again."
     )]
     UpgradeFailed {
         current: String,
@@ -89,7 +89,7 @@ pub(crate) enum MinimumVersionError {
     /// `grok update --version X` requested a version below the floor.
     #[error(
         "Cannot install Grok {target}: the configured minimum is {minimum}. \
-         Run `grok update` to install the latest allowed version."
+         Run `grok-cli update` to install the latest allowed version."
     )]
     TargetBelowFloor { target: String, minimum: String },
 }
@@ -281,7 +281,7 @@ pub async fn enforce_minimum_version_or_exit(update_config: &UpdateConfig) {
             // child process ever writes to a broken pipe. For now this
             // path is rare (only fires when the server pushes a minimum
             // version bump), so print a relaunch message instead.
-            eprintln!("Update installed. Run `grok` to start.");
+            eprintln!("Update installed. Run `grok-cli` to start.");
             std::process::exit(0);
         }
         Err(e) => {

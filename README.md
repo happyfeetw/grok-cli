@@ -80,6 +80,10 @@ grok-cli --version
 The installed command is **`grok-cli`** (not `grok`), so it will not replace
 or shadow the official SpaceXAI/xAI `grok` binary.
 
+In-app updates (`grok-cli update` / auto-update) pull from **this fork**:
+npm package `@spikewang/grok-cli` and GitHub Releases on
+`happyfeetw/grok-cli` — not from `x.ai/cli` or `@xai-official/grok`.
+
 Publishes only **macOS** optional binaries:
 
 | Package | Platform |

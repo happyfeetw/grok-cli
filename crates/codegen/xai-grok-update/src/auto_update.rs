@@ -25,21 +25,22 @@ pub enum UpdateRunMode {
 
 const PROMPT_UPDATE_NOW: &str = "Update now? [Y/n/d]";
 const MSG_AUTO_UPDATE_BACKGROUND: &str = "Auto-update running in background.";
-const MSG_RUN_UPDATE_MANUAL: &str = "Run `grok update` to get the latest version.";
-/// Manual-install one-liner for this platform's bootstrap installer.
+const MSG_RUN_UPDATE_MANUAL: &str = "Run `grok-cli update` to get the latest version.";
+/// Manual-install one-liner for this fork (no official x.ai bootstrap).
 fn manual_install_cmd() -> &'static str {
-    if cfg!(windows) {
-        "irm https://x.ai/cli/install.ps1 | iex"
-    } else {
-        "curl -fsSL https://x.ai/cli/install.sh | bash"
-    }
+    "npm install -g @spikewang/grok-cli"
 }
 
 /// Build a reinstall hint for a known installer type.
 fn reinstall_hint(installer: &str) -> String {
     match installer {
-        "npm" => "Please reinstall via npm:\n  npm i -g @xai-official/grok".to_string(),
-        "gh-release" => "Please reinstall via GitHub Releases:\n  gh release download --repo xai-org-shared/grok-build --pattern 'grok-*' --output grok && chmod +x grok".to_string(),
+        "npm" => "Please reinstall via npm:\n  npm i -g @spikewang/grok-cli".to_string(),
+        "gh-release" | "internal" => {
+            "Please reinstall via GitHub Releases:\n  \
+             https://github.com/happyfeetw/grok-cli/releases\n  \
+             (or: npm i -g @spikewang/grok-cli)"
+                .to_string()
+        }
         _ => format!("Please reinstall via:\n  {}", manual_install_cmd()),
     }
 }
@@ -66,7 +67,7 @@ pub fn print_update_status(status: &UpdateStatus, json: bool) -> anyhow::Result<
 
     if let Some(error) = status.error.as_deref() {
         println!(
-            "Grok Build - v{} [{}]",
+            "grok-cli - v{} [{}]",
             status.current_version, status.channel
         );
         println!("Update check failed: {error}");
@@ -78,24 +79,24 @@ pub fn print_update_status(status: &UpdateStatus, json: bool) -> anyhow::Result<
     if status.update_available {
         if let Some(latest_version) = status.latest_version.as_deref() {
             println!(
-                "A new version of Grok Build is available: {} -> {}{}",
+                "A new version of grok-cli is available: {} -> {}{}",
                 status.current_version, latest_version, channel_label
             );
         } else {
-            println!("A new version of Grok Build is available.");
+            println!("A new version of grok-cli is available.");
         }
         return Ok(());
     }
 
     if let Some(latest_version) = status.latest_version.as_deref() {
         println!(
-            "Grok Build - v{} (latest: {}){}",
+            "grok-cli - v{} (latest: {}){}",
             status.current_version, latest_version, channel_label
         );
         return Ok(());
     }
 
-    println!("Grok Build - v{}{}", status.current_version, channel_label);
+    println!("grok-cli - v{}{}", status.current_version, channel_label);
     Ok(())
 }
 
@@ -523,7 +524,7 @@ pub async fn run_update_if_available(
     let channel_label = format!(" [{}]", update_config.channel);
     if auto_update {
         eprintln!(
-            "A new version of Grok Build is available: {} -> {}{}",
+            "A new version of grok-cli is available: {} -> {}{}",
             current_version, latest_version, channel_label
         );
         if interactive {
@@ -551,7 +552,7 @@ pub async fn run_update_if_available(
             return Ok(false);
         }
         eprintln!(
-            "A new version of Grok Build is available: {} -> {}{}",
+            "A new version of grok-cli is available: {} -> {}{}",
             current_version, latest_version, channel_label
         );
         if interactive {
@@ -617,7 +618,7 @@ async fn run_update_subcommand(run_mode: UpdateRunMode) -> Result<Option<tokio::
             // No detach: the child must stay in the foreground process group so Ctrl+C cancels it with the parent; the atomic install protocol makes mid-download kills safe.
             let status = cmd.status().await?;
             if !status.success() {
-                anyhow::bail!("grok update failed with {}", status);
+                anyhow::bail!("grok-cli update failed with {}", status);
             }
             Ok(None)
         }
@@ -656,7 +657,7 @@ pub fn restart_grok() -> Result<()> {
     }
     cmd.env_clear();
     cmd.envs(std::env::vars_os().filter(|(k, _)| k != "GROK_AUTO_UPDATE"));
-    eprintln!("Restarting Grok...");
+    eprintln!("Restarting grok-cli...");
 
     // Use exec on Unix to replace the current process, avoiding stdio issues
     // when the parent exits. On Windows, fall back to spawn + exit.
@@ -694,8 +695,9 @@ pub async fn run_install_script(
             &update_config.channel,
             update_config.npm_registry.as_deref(),
         ),
-        "gh-release" => install_gh_release(target).await,
-        _ => install_internal(target, update_config).await,
+        // Fork has no x.ai CDN; treat internal installs like GitHub Releases.
+        "gh-release" | "internal" => install_gh_release(target).await,
+        _ => install_gh_release(target).await,
     };
     if result.is_ok() {
         remove_stale_models_cache().await;
@@ -1087,6 +1089,7 @@ async fn download_cli_artifact_from_gcs(
     }
 }
 
+#[allow(dead_code)] // retained for tests / optional CDN installs; fork uses gh-release
 async fn install_internal(target: Option<&str>, update_config: &UpdateConfig) -> Result<()> {
     install_internal_from_bases(target, update_config, crate::version::CLI_BASE_URLS).await
 }
@@ -1342,11 +1345,15 @@ async fn swap_managed_bin_links(
     binary_path: &std::path::Path,
     bin_dir: &std::path::Path,
 ) -> Result<std::path::PathBuf> {
-    let grok_name = if cfg!(windows) { "grok.exe" } else { "grok" };
-    let agent_name = if cfg!(windows) { "agent.exe" } else { "agent" };
-    let grok_link = bin_dir.join(grok_name);
-    let agent_link = bin_dir.join(agent_name);
-    let link_paths: [std::path::PathBuf; 2] = [grok_link.clone(), agent_link];
+    // Fork installs only manage `grok-cli` so we never overwrite an official
+    // `grok` / `agent` symlink sitting in the same ~/.grok/bin directory.
+    let cli_name = if cfg!(windows) {
+        "grok-cli.exe"
+    } else {
+        "grok-cli"
+    };
+    let grok_link = bin_dir.join(cli_name);
+    let link_paths: [std::path::PathBuf; 1] = [grok_link.clone()];
 
     // Capture every link up-front so a 2nd-link capture failure can't
     // strand the 1st mid-swap.
@@ -1901,69 +1908,91 @@ async fn gh_release_download(tag: &str, pattern: &str, dest: &std::path::Path) -
     Ok(())
 }
 
-/// Download and install grok from GitHub Releases (xai-org-shared/grok-build).
+/// Download and install grok-cli from this fork's GitHub Releases
+/// (`happyfeetw/grok-cli`).
 ///
-/// Uses `gh release download` to fetch the binary matching the current platform.
-/// This works anywhere the `gh` CLI is authenticated, without needing npm or
-/// internal network access.
+/// Assets are tar.gz archives named `grok-cli-<ver>-darwin-<arm64|x64>.tar.gz`
+/// containing a single `grok-cli` binary.
 async fn install_gh_release(target: Option<&str>) -> Result<()> {
-    let (os, arch) = detect_platform()?;
-    let platform = format!("{}-{}", os, arch);
-
     let version = match target {
         Some(v) => v.to_string(),
         None => crate::version::fetch_gh_release_version("stable").await?,
     };
 
+    let asset_name = fork_release_asset_name(&version)?;
     let grok_home = grok_home();
     let download_dir = grok_home.join("downloads");
     let bin_dir = grok_home.join("bin");
     tokio::fs::create_dir_all(&download_dir).await?;
     tokio::fs::create_dir_all(&bin_dir).await?;
 
-    let binary_name = format!("grok-{}-{}", version, platform);
-    let binary_path = download_dir.join(&binary_name);
+    let tar_path = download_dir.join(&asset_name);
     let tag = format!("v{}", version);
 
     eprintln!(
-        "  Downloading grok v{} ({}) from GitHub Releases...",
-        version, platform
+        "  Downloading grok-cli v{} ({}) from GitHub Releases...",
+        version, asset_name
     );
 
-    gh_release_download(&tag, &binary_name, &binary_path).await?;
+    gh_release_download(&tag, &asset_name, &tar_path).await?;
 
-    // chmod +x
+    // Extract the `grok-cli` binary from the tarball into downloads/.
+    let extract_dir = download_dir.join(format!(".extract-{}-{}", version, std::process::id()));
+    tokio::fs::create_dir_all(&extract_dir).await?;
+    let tar_status = tokio::process::Command::new("tar")
+        .args([
+            "-xzf",
+            &tar_path.to_string_lossy(),
+            "-C",
+            &extract_dir.to_string_lossy(),
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .output()
+        .await?;
+    if !tar_status.status.success() {
+        let stderr = String::from_utf8_lossy(&tar_status.stderr);
+        let _ = tokio::fs::remove_dir_all(&extract_dir).await;
+        anyhow::bail!("failed to extract {}: {}", asset_name, stderr.trim());
+    }
+
+    let extracted = extract_dir.join("grok-cli");
+    if !extracted.exists() {
+        let _ = tokio::fs::remove_dir_all(&extract_dir).await;
+        anyhow::bail!("archive {} did not contain a grok-cli binary", asset_name);
+    }
+
+    let binary_name = format!("grok-cli-{}", version);
+    let binary_path = download_dir.join(&binary_name);
+    tokio::fs::copy(&extracted, &binary_path).await?;
+    let _ = tokio::fs::remove_dir_all(&extract_dir).await;
+    let _ = tokio::fs::remove_file(&tar_path).await;
+
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         tokio::fs::set_permissions(&binary_path, std::fs::Permissions::from_mode(0o755)).await?;
     }
 
-    // Atomic swap of ~/.grok/bin/{grok,agent} -> downloaded binary.
+    // Atomic swap of ~/.grok/bin/grok-cli -> downloaded binary.
     swap_managed_bin_links(&binary_path, &bin_dir).await?;
 
-    // Update grok-latest -> versioned binary so any existing symlinks that route
-    // through it (e.g. /usr/local/bin/grok -> ~/.grok/downloads/grok-latest)
-    // resolve to the newly installed version.
     #[cfg(unix)]
     {
-        let latest_path = download_dir.join("grok-latest");
+        let latest_path = download_dir.join("grok-cli-latest");
         let rel_target = relative_symlink_target(&binary_path, &latest_path);
         if let Err(e) = atomic_symlink_swap(&rel_target, &latest_path).await {
-            tracing::warn!("Failed to update grok-latest symlink: {e}");
+            tracing::warn!("Failed to update grok-cli-latest symlink: {e}");
         }
     }
 
-    // Also update /usr/local/bin/{grok,agent} if either points directly into
-    // ~/.grok/downloads/ (legacy layout — skips the grok-latest indirection).
-    // Permission errors ignored.
     #[cfg(unix)]
-    for name in ["grok", "agent"] {
-        let system_link = std::path::PathBuf::from(format!("/usr/local/bin/{name}"));
+    {
+        let system_link = std::path::PathBuf::from("/usr/local/bin/grok-cli");
         if let Ok(existing_target) = tokio::fs::read_link(&system_link).await {
             let target_str = existing_target.to_string_lossy();
-            if target_str.contains(".grok/downloads/") && !target_str.ends_with("grok-latest") {
-                // Try to update; ignore permission errors
+            if target_str.contains(".grok/downloads/") {
                 let _ = atomic_symlink_swap(&binary_path, &system_link).await;
             }
         }
@@ -1973,17 +2002,34 @@ async fn install_gh_release(target: Option<&str>) -> Result<()> {
 
     eprintln!();
 
-    // Clean up old versioned binaries (keeps current + 1 previous).
-    cleanup_old_downloads(&download_dir, "grok", &version).await;
-    cleanup_old_downloads(&download_dir, "grok-pager", &version).await;
+    cleanup_old_downloads(&download_dir, "grok-cli", &version).await;
 
-    // Persist installer to config.toml so future runs auto-detect gh-release.
     let _ = config::update_config(|st| {
         st.cli.installer = Some("gh-release".to_string());
     })
     .await;
 
     Ok(())
+}
+
+/// Map host platform to this fork's GitHub Release asset name.
+/// Example: `grok-cli-0.1.222-darwin-arm64.tar.gz`
+fn fork_release_asset_name(version: &str) -> Result<String> {
+    let (os, arch) = detect_platform()?;
+    let os_tag = match os {
+        "macos" => "darwin",
+        "linux" => "linux",
+        "windows" => "win32",
+        other => anyhow::bail!("unsupported OS for fork releases: {other}"),
+    };
+    let arch_tag = match arch {
+        "aarch64" => "arm64",
+        "x86_64" => "x64",
+        other => anyhow::bail!("unsupported arch for fork releases: {other}"),
+    };
+    Ok(format!(
+        "grok-cli-{version}-{os_tag}-{arch_tag}.tar.gz"
+    ))
 }
 
 /// Creates a temporary .npmrc file with the NPM token if present.
@@ -2072,7 +2118,7 @@ fn install_npm(target: Option<&str>, channel: &str, npm_registry: Option<&str>) 
     warn_if_other_grok_processes_running();
 
     let version_arg = match target {
-        Some(ver) => format!("@xai-official/grok@{ver}"),
+        Some(ver) => format!("@spikewang/grok-cli@{ver}"),
         None => {
             // All current callers resolve the version via get_latest_version
             // (which applies max(stable, alpha) for the alpha channel) before
@@ -2083,7 +2129,7 @@ fn install_npm(target: Option<&str>, channel: &str, npm_registry: Option<&str>) 
                 "install_npm called without a resolved version, falling back to dist-tag"
             );
             format!(
-                "@xai-official/grok@{}",
+                "@spikewang/grok-cli@{}",
                 if channel == "alpha" {
                     "alpha"
                 } else {
@@ -2188,7 +2234,7 @@ pub async fn run_update(
             anyhow::bail!("{e}");
         }
         eprintln!(
-            "Installing Grok {} (current: {})...",
+            "Installing grok-cli {} (current: {})...",
             version, current_version
         );
         eprintln!();
@@ -2201,8 +2247,8 @@ pub async fn run_update(
         {
             tracing::warn!("Failed to persist auto_update=false for pinned install: {e}");
         }
-        eprintln!("  ✓ grok v{} installed successfully!", version);
-        eprintln!("  Please restart Grok.");
+        eprintln!("  ✓ grok-cli v{} installed successfully!", version);
+        eprintln!("  Please restart grok-cli.");
         return Ok(Some(version.to_string()));
     }
 
@@ -2316,10 +2362,10 @@ pub async fn run_update(
     let stable_ptr = try_fetch_stable_pointer().await;
     write_version_cache(target_version, stable_ptr.as_deref()).await;
     refresh_deployment_config().await;
-    eprintln!("  ✓ grok v{} installed successfully!", target_version);
+    eprintln!("  ✓ grok-cli v{} installed successfully!", target_version);
 
     if !force && std::env::var_os("GROK_AUTO_UPDATE").is_none() {
-        eprintln!("  Please restart Grok.");
+        eprintln!("  Please restart grok-cli.");
     }
     Ok(Some(target_version.to_string()))
 }
@@ -2347,7 +2393,7 @@ async fn refresh_deployment_config() {
         Err(e) if e.is_auth_rejection() => tracing::debug!("managed config not applied: {e}"),
         Err(e) if e.is_retryable() => {
             tracing::debug!("managed config refresh failed: {e}");
-            eprintln!("  Couldn't apply managed configuration. Run `grok setup` to retry.");
+            eprintln!("  Couldn't apply managed configuration. Run `grok-cli setup` to retry.");
         }
         Err(e) => eprintln!("  Couldn't apply managed configuration. {e}"),
     }
@@ -3214,7 +3260,7 @@ mod tests {
         let hint = reinstall_hint("npm");
         assert!(hint.contains("npm i -g"), "should suggest npm i -g: {hint}");
         assert!(
-            hint.contains("@xai-official/grok"),
+            hint.contains("@spikewang/grok-cli"),
             "should name the package: {hint}"
         );
     }
@@ -3223,45 +3269,42 @@ mod tests {
     fn test_reinstall_hint_gh_release_mentions_gh_command() {
         let hint = reinstall_hint("gh-release");
         assert!(
-            hint.contains("gh release download"),
-            "should suggest gh release download: {hint}"
+            hint.contains("happyfeetw/grok-cli"),
+            "should name the fork repo: {hint}"
         );
         assert!(
-            hint.contains("xai-org-shared/grok-build"),
-            "should name the repo: {hint}"
+            hint.contains("npm i -g @spikewang/grok-cli")
+                || hint.contains("@spikewang/grok-cli"),
+            "should offer npm fallback: {hint}"
         );
     }
 
     #[test]
     fn test_reinstall_hint_internal_mentions_platform_installer() {
+        // Fork maps "internal" to the same reinstall path as gh-release.
         let hint = reinstall_hint("internal");
-        if cfg!(windows) {
-            assert!(hint.contains("irm"), "should suggest irm install: {hint}");
-            assert!(
-                hint.contains("install.ps1"),
-                "should reference install.ps1: {hint}"
-            );
-        } else {
-            assert!(hint.contains("curl"), "should suggest curl install: {hint}");
-            assert!(
-                hint.contains("install.sh"),
-                "should reference install.sh: {hint}"
-            );
-        }
+        assert!(
+            hint.contains("happyfeetw/grok-cli") || hint.contains("@spikewang/grok-cli"),
+            "should point at the fork: {hint}"
+        );
     }
 
     #[test]
-    fn test_reinstall_hint_unknown_falls_back_to_internal() {
-        // Unknown installer falls back to the same hint as "internal".
+    fn test_reinstall_hint_unknown_falls_back_to_manual() {
         let unknown = reinstall_hint("homebrew");
-        let internal = reinstall_hint("internal");
-        assert_eq!(unknown, internal);
+        assert!(
+            unknown.contains("@spikewang/grok-cli"),
+            "unknown installer should suggest fork npm install: {unknown}"
+        );
     }
 
     #[test]
-    fn test_reinstall_hint_empty_falls_back_to_internal() {
+    fn test_reinstall_hint_empty_falls_back_to_manual() {
         let hint = reinstall_hint("");
-        assert_eq!(hint, reinstall_hint("internal"));
+        assert!(
+            hint.contains("@spikewang/grok-cli"),
+            "empty installer should suggest fork npm install: {hint}"
+        );
     }
 
     // ──────────────────────────────────────────────────────────────────────
@@ -3967,7 +4010,7 @@ mod tests {
         );
         assert_eq!(
             MSG_RUN_UPDATE_MANUAL,
-            "Run `grok update` to get the latest version."
+            "Run `grok-cli update` to get the latest version."
         );
     }
 

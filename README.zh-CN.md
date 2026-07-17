@@ -71,6 +71,10 @@ grok-cli --version
 安装后的命令是 **`grok-cli`**（不是 `grok`），不会覆盖或抢占官方 SpaceXAI/xAI
 的 `grok` 命令。
 
+应用内更新（`grok-cli update` / 自动更新）只拉 **本 fork**：npm 包
+`@spikewang/grok-cli` 与 GitHub Releases 仓库 `happyfeetw/grok-cli`，
+**不会**走 `x.ai/cli` 或 `@xai-official/grok`。
+
 当前仅发布 **macOS** 平台可选依赖：
 
 | 包名 | 平台 |

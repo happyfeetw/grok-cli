@@ -76,8 +76,8 @@ clipboard (containers, SSH) and your terminal does not handle OSC 52 itself
 sync with your window size.
 
 Examples:
-  grok wrap docker exec -it my-container bash
-  grok wrap kubectl exec -it my-pod -- bash
+  grok-cli wrap docker exec -it my-container bash
+  grok-cli wrap kubectl exec -it my-pod -- bash
 
 See ~/.grok/README.md for more information.
 ")]
@@ -86,7 +86,7 @@ See ~/.grok/README.md for more information.
     Export(crate::export_cmd::ExportArgs),
     /// Export or upload session trace data
     Trace(crate::trace_cmd::TraceArgs),
-    /// Check for updates or install a specific version
+    /// Check for updates or install a specific version (fork channels)
     Update {
         /// Check for updates without installing.
         #[arg(long)]
@@ -408,9 +408,9 @@ fn version_with_channel() -> &'static str {
 }
 #[derive(Debug, Clone, Parser)]
 #[command(
-    name = "grok",
+    name = "grok-cli",
     version = version_with_channel(),
-    about = "Grok Build TUI",
+    about = "grok-cli — community fork of Grok Build (system-proxy + packaging)",
     disable_version_flag = true,
     next_display_order = None,
     help_template = "\
@@ -778,8 +778,8 @@ impl PagerArgs {
             .map(std::path::Path::new)
             .and_then(|p| p.file_name())
             .and_then(|n| n.to_str())
-            .filter(|n| *n == "grok" || *n == "agent")
-            .unwrap_or("grok")
+            .filter(|n| *n == "grok-cli" || *n == "grok" || *n == "agent")
+            .unwrap_or("grok-cli")
             .to_owned();
         let mut args = Self::parse_from(std::iter::once(bin_name).chain(std::env::args().skip(1)));
         if let Some(socket) = args.leader_socket.take() {
