@@ -1,5 +1,7 @@
 # Security Policy
 
+**English** | [简体中文](SECURITY.zh-CN.md)
+
 ## Reporting a vulnerability
 
 Please **do not** open a public GitHub issue for security reports.

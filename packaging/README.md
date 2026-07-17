@@ -1,5 +1,7 @@
 # Packaging — `@spikewang/grok-cli`
 
+**English** | [简体中文](README.zh-CN.md)
+
 Distribution channels for this fork:
 
 | Channel | Package / formula | Platforms |

@@ -4,6 +4,8 @@ Thank you for your interest in **grok-cli** — a community fork of open-source
 [Grok Build](https://github.com/xai-org/grok-build) with packaging and
 system-proxy fixes. **External contributions are welcome.**
 
+中文版 / Chinese: [`CONTRIBUTING.zh-CN.md`](CONTRIBUTING.zh-CN.md)
+
 By participating, you agree to keep discussions respectful and constructive.
 Serious abuse or harassment may result in blocked interaction with this
 repository.
@@ -26,7 +28,7 @@ problem and a possible approach.
 2. For large changes (new platforms, dependency major bumps, public API
    changes), open an issue for discussion before investing a lot of work.
 3. Security vulnerabilities must **not** be filed as public issues. Follow
-   [`SECURITY.md`](SECURITY.md).
+   [`SECURITY.md`](SECURITY.md) / [`SECURITY.zh-CN.md`](SECURITY.zh-CN.md).
 
 ## Development setup
 

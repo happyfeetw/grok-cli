@@ -1,5 +1,7 @@
 <div align="center">
 
+<p><strong>English</strong> | <a href="README.zh-CN.md">简体中文</a></p>
+
 <h1>
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="https://media.x.ai/v1/website/spacexai-symbol-white-transparent-0c31957f.png">
@@ -214,8 +216,9 @@ cargo fmt --all               # rustfmt.toml at the repo root
 **External contributions are welcome.** Bug reports, docs fixes, packaging
 improvements, and feature PRs are all appreciated.
 
-Please read [`CONTRIBUTING.md`](CONTRIBUTING.md) for the workflow (issues, PR
-expectations, coding style, and licensing of contributions).
+Please read [`CONTRIBUTING.md`](CONTRIBUTING.md) (English) or
+[`CONTRIBUTING.zh-CN.md`](CONTRIBUTING.zh-CN.md) (简体中文) for the workflow
+(issues, PR expectations, coding style, and licensing of contributions).
 
 This project acknowledges the [LINUX DO](https://linux.do) community.
 
