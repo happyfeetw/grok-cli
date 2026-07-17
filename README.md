@@ -52,11 +52,6 @@ This repository is a **community fork** of the open-source Grok Build tree
 (upstream: [xai-org/grok-build](https://github.com/xai-org/grok-build)), with
 extra packaging and system-proxy fixes. Contributions are welcome.
 
-<p>
-  <strong>本项目积极参与并认可
-  <a href="https://linux.do">LINUX DO</a> 社区</strong>
-</p>
-
 </div>
 
 ---
