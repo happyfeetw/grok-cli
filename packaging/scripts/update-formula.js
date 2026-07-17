@@ -50,7 +50,7 @@ const formula = `class GrokCli < Formula
   end
 
   def install
-    # Ship as grok-cli so it does not shadow the official `grok` command.
+    # Ship as grok-cli so it does not shadow the official grok command.
     bin.install "grok-cli"
   end
 
