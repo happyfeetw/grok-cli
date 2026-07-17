@@ -129,9 +129,10 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ env.PRODUCT }}-${{ needs.meta.outputs.version }}-darwin-${{ matrix.npm_arch }}
+          # Upload directories (not globs) so nested layout is predictable.
           path: |
-            dist/*
-            stage/xai-grok-pager
+            dist/
+            stage/
           if-no-files-found: error
           retention-days: 14
 
@@ -153,11 +154,31 @@ jobs:
           set -euo pipefail
           VERSION="${{ needs.meta.outputs.version }}"
           mkdir -p release-assets
-          find artifacts -type f \( -name '*.tar.gz' -o -name '*.tar.gz.sha256' \) -print -exec cp {} release-assets/ \;
+          # Artifacts unpack as artifacts/<name>/dist/... — find regardless of nesting.
+          find artifacts -type f \( -name '*.tar.gz' -o -name '*.tar.gz.sha256' \) -print -exec cp -f {} release-assets/ \;
           ls -la release-assets
+          test -f "release-assets/${PRODUCT}-${VERSION}-darwin-arm64.tar.gz"
+          test -f "release-assets/${PRODUCT}-${VERSION}-darwin-x64.tar.gz"
 
-          ARM64_SHA=$(cat "artifacts/${PRODUCT}-${VERSION}-darwin-arm64/${PRODUCT}-${VERSION}-darwin-arm64.sha256hex")
-          X64_SHA=$(cat "artifacts/${PRODUCT}-${VERSION}-darwin-x64/${PRODUCT}-${VERSION}-darwin-x64.sha256hex")
+          # Prefer pure-hex file; fall back to first field of `shasum` output.
+          hex_or_sha() {
+            local arch="$1"
+            local hex
+            hex=$(find artifacts -type f -name "${PRODUCT}-${VERSION}-darwin-${arch}.sha256hex" | head -1 || true)
+            if [[ -n "${hex}" && -f "${hex}" ]]; then
+              tr -d '[:space:]' < "${hex}"
+              return
+            fi
+            local side
+            side=$(find artifacts release-assets -type f -name "${PRODUCT}-${VERSION}-darwin-${arch}.tar.gz.sha256" | head -1)
+            test -n "${side}"
+            awk '{print $1}' "${side}"
+          }
+
+          ARM64_SHA=$(hex_or_sha arm64)
+          X64_SHA=$(hex_or_sha x64)
+          echo "arm64_sha=${ARM64_SHA}"
+          echo "x64_sha=${X64_SHA}"
           echo "arm64_sha=${ARM64_SHA}" >> "$GITHUB_OUTPUT"
           echo "x64_sha=${X64_SHA}" >> "$GITHUB_OUTPUT"
 
@@ -204,7 +225,8 @@ jobs:
             | `grok-cli-${{ needs.meta.outputs.version }}-darwin-x64.tar.gz` | macOS Intel |
 
             Each archive contains a single `grok` binary. Checksums: `*.sha256`.
-          files: release-assets/*
+          files: |
+            release-assets/**
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -262,9 +284,8 @@ jobs:
         run: |
           set -euo pipefail
           if [[ -z "${NPM_TOKEN:-}" ]]; then
-            echo "::warning::NPM_TOKEN secret not set; skipping npm publish"
-            echo "Add repo secret NPM_TOKEN (npm automation token with publish rights for @spikewang)."
-            exit 0
+            echo "::error::NPM_TOKEN secret not set; cannot publish npm packages"
+            exit 1
           fi
           VERSION="${{ needs.meta.outputs.version }}"
           ARM=$(find artifacts -path "*darwin-arm64*" -name 'xai-grok-pager' -type f | head -1)
