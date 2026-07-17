@@ -1,7 +1,7 @@
 class GrokCli < Formula
   desc "Grok coding agent CLI (fork with system-proxy support)"
   homepage "https://github.com/happyfeetw/grok-cli"
-  version "0.1.224"
+  version "0.1.225"
   license "Apache-2.0"
 
   livecheck do
@@ -11,12 +11,12 @@ class GrokCli < Formula
 
   on_macos do
     on_arm do
-      url "https://github.com/happyfeetw/grok-cli/releases/download/v0.1.224/grok-cli-0.1.224-darwin-arm64.tar.gz"
-      sha256 "a4ead2c65efdeab5652fa90b7e87d4b5f1cbf6e29fc19bcd6f83327cdb7b82f4"
+      url "https://github.com/happyfeetw/grok-cli/releases/download/v0.1.225/grok-cli-0.1.225-darwin-arm64.tar.gz"
+      sha256 "ef6c5eac331dd14cd68cb68175a4aca4e481c9d6cffa6c5829347f1cce42ea43"
     end
     on_intel do
-      url "https://github.com/happyfeetw/grok-cli/releases/download/v0.1.224/grok-cli-0.1.224-darwin-x64.tar.gz"
-      sha256 "dd85230dc89b0adb2222cae68b9d457c8328238c9337cf3ca1e4bc56ddaec1f2"
+      url "https://github.com/happyfeetw/grok-cli/releases/download/v0.1.225/grok-cli-0.1.225-darwin-x64.tar.gz"
+      sha256 "db56be5b9a927ff4f260ab07d3260a304d68f8cdb3cce4eb92a09d149ad18820"
     end
   end
 
