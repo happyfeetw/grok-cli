@@ -305,15 +305,21 @@ pub async fn get_installer() -> Option<&'static str> {
     }
 }
 
+/// This community fork publishes stable builds as `BASE-N` (e.g. `0.2.105-1`),
+/// which is a SemVer **pre-release** with a purely numeric identifier. Treat
+/// those as production, not alpha/beta candidates. Reject other pre labels
+/// (`alpha`, `beta`, `rc`, …) on the stable channel.
+fn is_numeric_fork_prerelease(pre: &semver::Prerelease) -> bool {
+    let s = pre.as_str();
+    !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit())
+}
+
 fn needs_update(current: &str, target: &str, channel: &str, allow_downgrade: bool) -> Option<bool> {
     let current = semver::Version::parse(current).ok()?;
     let target = semver::Version::parse(target).ok()?;
     match channel {
-        // NOTE: With the 0.2.X versioning scheme, all versions are plain
-        // semver (no pre-release suffix). The pre-release checks in this
-        // match are dead code but kept as a safety net.
         "stable" | "enterprise" => {
-            if !target.pre.is_empty() {
+            if !target.pre.is_empty() && !is_numeric_fork_prerelease(&target.pre) {
                 tracing::warn!(
                     %current, %target,
                     channel = %channel,
@@ -321,7 +327,10 @@ fn needs_update(current: &str, target: &str, channel: &str, allow_downgrade: boo
                 );
                 return Some(false);
             }
-            if !current.pre.is_empty() {
+            // Force install when the running build is a non-numeric pre
+            // (alpha/beta) so users leave candidate channels for stable.
+            // Numeric fork counters (`-1`, `-2`) compare normally below.
+            if !current.pre.is_empty() && !is_numeric_fork_prerelease(&current.pre) {
                 return Some(true);
             }
         }
@@ -3100,6 +3109,32 @@ mod tests {
         );
         assert_eq!(
             needs_update("0.1.0", "0.1.1-beta.1", "stable", false),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn test_needs_update_stable_accepts_numeric_fork_prerelease() {
+        // Fork scheme: BASE-N is a production release on stable.
+        assert_eq!(
+            needs_update("0.1.227", "0.2.105-1", "stable", false),
+            Some(true)
+        );
+        assert_eq!(
+            needs_update("0.2.105-1", "0.2.105-2", "stable", false),
+            Some(true)
+        );
+        assert_eq!(
+            needs_update("0.2.105-2", "0.2.105-1", "stable", false),
+            Some(false)
+        );
+        assert_eq!(
+            needs_update("0.2.105-1", "0.2.105-1", "stable", false),
+            Some(false)
+        );
+        // Still reject named pre-releases.
+        assert_eq!(
+            needs_update("0.2.105-1", "0.2.106-alpha.1", "stable", false),
             Some(false)
         );
     }

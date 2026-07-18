@@ -10,7 +10,7 @@
 | **Homebrew** | `happyfeetw/grok-cli` tap → `grok-cli` | macOS arm64 + x64 |
 | **GitHub Releases** | `grok-cli-<version>-darwin-<arch>.tar.gz` | 仅 macOS |
 
-## 版本管理（与上游官方一致）
+## 版本管理（上游约定 + SemVer 2.0）
 
 二进制侧遵循 **官方 Grok Build** 约定：
 
@@ -27,10 +27,33 @@
 | npm / formula / tag | `sync-version.js` 写入 | 来自 `packaging/VERSION` |
 | `--version` 展示 | `VERSION_WITH_COMMIT` | `{version} ({git short sha})` |
 
+### Fork 编号（SemVer 2.0 预发布后缀）
+
+产品版本以 **上游三段号为基线**，本 fork 仅在本基线上的增量用 **预发布后缀**
+`-N`（符合 [SemVer 2.0](https://semver.org/lang/zh-CN/)）：
+
+| 场景 | `packaging/VERSION` 示例 | 含义 |
+|------|--------------------------|------|
+| 刚合入上游 `0.2.105` | `0.2.105-1` | 该基线上的第 1 个社区发版 |
+| 下次合入上游前的 fork 改动 | `0.2.105-2`、`0.2.105-3`… | 只递增 `-N` |
+| 上游新基线 `0.2.120` | `0.2.120-1` | 基线重置，后缀从 `-1` 重计 |
+
+规则：
+
+1. **基线 BASE** = 上游产品三段版本（合入后对照 monorepo shipping crates /
+   `SOURCE_REV`，例如 `0.2.105`）。
+2. **对外发布一律用** `BASE-N`，**不要**单独发裸 `BASE`。SemVer 下
+   `0.2.105-1` < `0.2.105`，若先发过裸 `0.2.105`，后面的 `0.2.105-N` 会被
+   npm / 更新检查当成更旧。
+3. **N** 为正整数，仅在两次上游同步之间递增。
+4. 再次合入上游后，改用新的三段基线并从 `-1` 开始。
+
+合法示例：`0.2.105-1`、`0.2.105-2`、`0.2.120-1`。
+
 升级并对齐打包面 + Cargo shipping crates：
 
 ```sh
-echo '0.1.225' > packaging/VERSION
+echo '0.2.105-1' > packaging/VERSION
 node packaging/scripts/sync-version.js
 ```
 

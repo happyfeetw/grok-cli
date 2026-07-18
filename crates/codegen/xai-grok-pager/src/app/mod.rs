@@ -1827,9 +1827,10 @@ mod tests {
         assert!(!args.no_alt_screen);
     }
     #[test]
-    fn cli_command_name_is_grok() {
+    fn cli_command_name_is_grok_cli() {
         use clap::CommandFactory;
-        assert_eq!(PagerArgs::command().get_name(), "grok");
+        // Community fork product command is `grok-cli` (not official `grok`).
+        assert_eq!(PagerArgs::command().get_name(), "grok-cli");
     }
     #[test]
     fn cli_help_output_header() {
@@ -1839,9 +1840,9 @@ mod tests {
         assert_eq!(
             first_5,
             vec![
-                "Grok Build TUI",
+                "grok-cli — community fork of Grok Build (system-proxy + packaging)",
                 "",
-                "Usage: grok [OPTIONS] [PROMPT] [COMMAND]",
+                "Usage: grok-cli [OPTIONS] [PROMPT] [COMMAND]",
                 "",
                 "Arguments:",
             ]

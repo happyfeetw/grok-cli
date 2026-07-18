@@ -1,6 +1,6 @@
 {
     "name": "@spikewang/grok-cli",
-    "version": "0.1.227",
+    "version": "0.2.105-1",
     "description": "Grok coding agent CLI fork (command: grok-cli; does not replace official grok)",
     "license": "Apache-2.0",
     "repository": {
@@ -35,8 +35,8 @@
         "node": ">=18"
     },
     "optionalDependencies": {
-        "@spikewang/grok-cli-darwin-arm64": "0.1.227",
-        "@spikewang/grok-cli-darwin-x64": "0.1.227"
+        "@spikewang/grok-cli-darwin-arm64": "0.2.105-1",
+        "@spikewang/grok-cli-darwin-x64": "0.2.105-1"
     },
     "keywords": [
         "grok",

@@ -1,6 +1,6 @@
 {
     "name": "@spikewang/grok-cli-darwin-x64",
-    "version": "0.1.227",
+    "version": "0.2.105-1",
     "description": "darwin-x64 binary for @spikewang/grok-cli. Do not install directly.",
     "license": "Apache-2.0",
     "repository": {

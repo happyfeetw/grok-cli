@@ -10,7 +10,7 @@ Distribution channels for this fork:
 | **Homebrew** | `happyfeetw/grok-cli` tap → `grok-cli` | macOS arm64 + x64 |
 | **GitHub Releases** | `grok-cli-<version>-darwin-<arch>.tar.gz` | macOS only |
 
-## Version management (upstream-compatible)
+## Version management (upstream-compatible + SemVer 2.0)
 
 This fork follows the **official Grok Build** version contract for the binary:
 
@@ -27,10 +27,34 @@ compiled VERSION = GROK_VERSION (if set at cargo build)
 | npm / formula / tags | stamped by `sync-version.js` | From `packaging/VERSION` |
 | `--version` string | `VERSION_WITH_COMMIT` | `{version} ({git short sha})` |
 
+### Fork numbering (SemVer 2.0 pre-release)
+
+Product versions are **based on the upstream three-part base**, with fork-only
+increments as a **SemVer pre-release** suffix (`-N`):
+
+| Situation | `packaging/VERSION` example | Meaning |
+|-----------|----------------------------|---------|
+| Just synced to upstream `0.2.105` | `0.2.105-1` | First community release on that base |
+| More fork-only changes before next sync | `0.2.105-2`, `0.2.105-3`, … | Bump the numeric pre-release |
+| Next upstream base is `0.2.120` | `0.2.120-1` | Reset suffix; start at `-1` again |
+
+Rules:
+
+1. **Base** = upstream product three-part version (e.g. shell/pager monorepo
+   `0.2.105` after a sync; see `SOURCE_REV` + shipping crates on upstream).
+2. **Published fork builds always use** `BASE-N` (never plain `BASE` alone).
+   Under SemVer 2.0, `0.2.105-1` < `0.2.105`, so shipping plain `0.2.105` would
+   make later `0.2.105-N` look *older* to npm/Homebrew/update checks.
+3. **N** is a positive integer that only increases between upstream syncs.
+4. After a new upstream sync, set base to the new three-part version and
+   restart at `-1`.
+
+Examples of valid strings: `0.2.105-1`, `0.2.105-2`, `0.2.120-1`.
+
 Bump and align packaging + Cargo shipping crates:
 
 ```sh
-echo '0.1.225' > packaging/VERSION
+echo '0.2.105-1' > packaging/VERSION
 node packaging/scripts/sync-version.js
 ```
 

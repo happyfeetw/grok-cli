@@ -14,11 +14,21 @@ packaging, branding, and distribution.
 
 ## [Unreleased]
 
+## [0.2.105-1] - 2026-07-19
+
 ### Changed
 
-- Merged upstream `xai-org/grok-build` (three monorepo sync commits; latest
-  `SOURCE_REV` / upstream shell ~0.2.105). Kept fork product naming (`grok-cli`,
-  `@spikewang/grok-cli`, system-proxy packaging) and resume/update branding.
+- Merged upstream `xai-org/grok-build` (three monorepo sync commits; `SOURCE_REV`
+  `f9736c7…`, upstream shipping base ~0.2.105). Includes default model
+  grok-4.5, coding-data-sharing default opt-out, canonical text editing,
+  security hardenings (SSRF, web_fetch, sandbox, plugin pins), MCP OAuth
+  RFC 9207 `iss`, and many pager/agent fixes. Fork product naming
+  (`grok-cli`, `@spikewang/grok-cli`, system-proxy) retained.
+- Versioning policy: SemVer 2.0 fork scheme — published builds use `BASE-N`
+  (e.g. `0.2.105-1`), never plain `BASE`. Documented in `packaging/README.md`.
+- Auto-update on the stable channel accepts numeric fork pre-releases
+  (`0.2.105-1`) so `grok-cli update` can install this scheme; still rejects
+  named candidates (`alpha` / `beta` / …).
 
 ## [0.1.227] - 2026-07-18
 
