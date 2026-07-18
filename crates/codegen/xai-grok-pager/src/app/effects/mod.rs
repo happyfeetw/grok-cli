@@ -66,11 +66,13 @@ pub(crate) fn execute(
                 tracing::warn!(error = % e, "project picker: failed to set_current_dir");
             }
         }
-        Effect::ScheduleClearAuthCopied => {
+        Effect::ScheduleClearAuthCopyFeedback { generation } => {
             tasks
-                .spawn(async {
+                .spawn(async move {
                     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                    TaskResult::AuthCopiedTimeout
+                    TaskResult::AuthCopyFeedbackTimeout {
+                        generation,
+                    }
                 });
         }
         Effect::Logout => {
@@ -80,6 +82,10 @@ pub(crate) fn execute(
                     send_logout(&tx).await;
                     TaskResult::LogoutComplete
                 });
+        }
+        Effect::CancelAuth { request_seq } => {
+            let tx = acp_tx.clone();
+            tasks.spawn(async move { send_auth_cancel(&tx, request_seq).await });
         }
         Effect::CheckSubscription { verify } => {
             let tx = acp_tx.clone();
@@ -1900,7 +1906,7 @@ pub(crate) fn execute(
         }
         Effect::PollAuthUrl { request_seq } => {
             let tx = acp_tx.clone();
-            tasks
+            let abort_handle = tasks
                 .spawn(async move {
                     let mut auth_url: Option<String> = None;
                     let mut external = false;
@@ -1944,6 +1950,7 @@ pub(crate) fn execute(
                         mode,
                     }
                 });
+            meta.auth_url_poll_handle = Some((request_seq, abort_handle));
         }
         Effect::SubmitAuthCode { request_seq, code } => {
             let tx = acp_tx.clone();
@@ -2043,7 +2050,24 @@ pub(crate) fn execute(
                                 .and_then(|s| s.as_str())
                                 .unwrap_or("unknown");
                             if status == "authenticated" {
-                                Ok(())
+                                Ok(
+                                    crate::app::actions::McpAuthTriggerOutcome::Authenticated,
+                                )
+                            } else if status == "setup_required" {
+                                let setup = result_obj
+                                    .and_then(|r| r.get("setup"))
+                                    .cloned()
+                                    .and_then(|value| {
+                                        serde_json::from_value::<
+                                            crate::views::mcps_modal::McpSetupConfig,
+                                        >(value)
+                                            .ok()
+                                    })
+                                    .ok_or_else(|| "setup required".to_string());
+                                setup
+                                    .map(
+                                        crate::app::actions::McpAuthTriggerOutcome::SetupRequired,
+                                    )
                             } else {
                                 let detail = result_obj
                                     .and_then(|r| r.get("error"))
@@ -2060,6 +2084,51 @@ pub(crate) fn execute(
                         }
                     };
                     TaskResult::McpAuthTriggerDone {
+                        agent_id,
+                        server_name,
+                        result,
+                    }
+                });
+        }
+        Effect::McpSetupSubmit { agent_id, session_id, server_name, values } => {
+            let tx = acp_tx.clone();
+            tasks
+                .spawn(async move {
+                    let params = serde_json::json!(
+                        { "sessionId" : session_id.0.to_string(), "serverName" :
+                        server_name, "values" : values, }
+                    );
+                    let req = acp::ExtRequest::new(
+                        "x.ai/mcp/setup",
+                        serde_json::value::to_raw_value(&params)
+                            .expect("serialize mcp/setup params")
+                            .into(),
+                    );
+                    let result = match acp_send(req, &tx).await {
+                        Ok(resp) => {
+                            let wrapper: serde_json::Value = serde_json::from_str(
+                                    resp.0.get(),
+                                )
+                                .unwrap_or_default();
+                            let result_obj = wrapper.get("result");
+                            if result_obj
+                                .and_then(|r| r.get("ok"))
+                                .and_then(|ok| ok.as_bool())
+                                .unwrap_or(false)
+                            {
+                                Ok(())
+                            } else {
+                                let detail = result_obj
+                                    .and_then(|r| r.get("error"))
+                                    .and_then(|e| e.as_str())
+                                    .map(|s| s.to_string())
+                                    .unwrap_or_else(|| "setup failed".to_string());
+                                Err(detail)
+                            }
+                        }
+                        Err(e) => Err(sanitize_user_error(&format!("setup failed: {e}"))),
+                    };
+                    TaskResult::McpSetupSubmitDone {
                         agent_id,
                         server_name,
                         result,
@@ -3235,7 +3304,7 @@ pub(crate) fn execute(
                     }
                 });
         }
-        Effect::SendBtw { agent_id, session_id, question } => {
+        Effect::SendBtw { agent_id, session_id, question, minimal_request_id } => {
             let tx = acp_tx.clone();
             tasks
                 .spawn(async move {
@@ -3265,6 +3334,7 @@ pub(crate) fn execute(
                             TaskResult::BtwResponse {
                                 agent_id,
                                 result: Ok(answer),
+                                minimal_request_id,
                             }
                         }
                         Err(e) => {
@@ -3273,6 +3343,7 @@ pub(crate) fn execute(
                                 result: Err(
                                     sanitize_user_error(&format!("side question failed: {e}")),
                                 ),
+                                minimal_request_id,
                             }
                         }
                     }
@@ -4180,17 +4251,9 @@ fn format_session_info(
         .as_deref()
         .map(|b| format!("\n  API Backend: {b}"))
         .unwrap_or_default();
-    let sandbox_line = match xai_grok_sandbox::profile_name() {
-        Some(profile) => {
-            let net = if xai_grok_sandbox::should_restrict_child_network() {
-                " (network: restricted)"
-            } else {
-                ""
-            };
-            format!("\n  Sandbox: {profile}{net}")
-        }
-        None => String::new(),
-    };
+    let sandbox_line = xai_grok_sandbox::profile_name()
+        .map(|profile| format!("\n  Sandbox: {profile}"))
+        .unwrap_or_default();
     let turn_line = format!("\n  Turn: {}", info.data.turn_index);
     let conversation_line = info
         .data

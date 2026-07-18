@@ -243,9 +243,6 @@ pub(crate) struct SubagentSpawnContext {
     /// Subagent personas config for persona/SOUL layering.
     pub subagent_personas:
         std::collections::HashMap<String, xai_grok_subagent_resolution::config::SubagentPersona>,
-    /// Pre-rendered persona IO summaries for the task tool description.
-    /// Threaded through to child sessions for recursive persona discovery.
-    pub persona_io_summaries: Vec<String>,
     /// Parent session's ChatStateHandle — used to read the actual live
     /// sampling config and credentials from the parent session actor (async).
     /// Cheap Clone (mpsc sender). `None` when parent SessionHandle not found.
@@ -348,9 +345,9 @@ pub(crate) struct SubagentSpawnContext {
     /// Parent's resolved vendor-compat config, inherited by the child so its
     /// skills / rules / AGENTS.md discovery honors the same vendor toggles.
     pub parent_compat: xai_grok_tools::types::compat::CompatConfig,
-    /// Shared set of IDs delivered via auto-wake synthetic prompts.
-    pub auto_wake_delivered:
-        Option<xai_grok_tools::reminders::task_completion::AutoWakeDeliveredIds>,
+    /// Shared completion reservations held by auto-wake prompts.
+    pub task_completion_reservations:
+        Option<xai_grok_tools::reminders::task_completion::TaskCompletionReservations>,
     /// Channel for requesting trace uploads for synthetic auto-wake turns.
     pub synthetic_trace_tx:
         Option<tokio::sync::mpsc::UnboundedSender<crate::upload::turn::SyntheticTurnTraceRequest>>,
@@ -422,6 +419,18 @@ impl SubagentSpawnContext {
             .resolve()
             .value
     }
+    pub fn resolve_compaction_tool_choice(&self) -> crate::util::config::CompactionToolChoice {
+        crate::util::config::resolve_compaction_tool_choice_from(
+            crate::agent::config::env_string(crate::util::config::ENV_COMPACTION_TOOL_CHOICE)
+                .as_deref(),
+            self.agent_config
+                .as_ref()
+                .and_then(|c| c.features.compaction_tool_choice.as_deref()),
+            self.remote_settings
+                .as_ref()
+                .and_then(|r| r.compaction_tool_choice.as_deref()),
+        )
+    }
     /// Whether a completed subagent's worktree is snapshotted into a durable ref
     /// and its directory deleted. Resolution mirrors the other subagent gates
     /// (env > config > remote settings > default). Default `false` so it ships dark;
@@ -474,7 +483,7 @@ pub(crate) struct CompletedSubagent {
     pub subagent_type: String,
     pub persona: Option<String>,
     pub started_at: std::time::Instant,
-    /// When the subagent moved to the completed map. Used for TTL eviction.
+    /// When the subagent moved to the completed map. Orders cap eviction.
     pub completed_at: std::time::Instant,
     pub result: SubagentResult,
     /// ID of the source subagent this session was resumed from.
@@ -492,6 +501,12 @@ pub(crate) struct CompletedSubagent {
     pub block_waited: bool,
     /// Set when the model explicitly killed this subagent via the kill tool.
     pub explicitly_killed: bool,
+    /// Directory whose `output.json` holds the output text; when set, the
+    /// stored `result.output` is cleared and `lookup` reads from disk.
+    /// `None` (failures, empty outputs, failed writes) serves from memory.
+    /// Process-scoped and local-only: resume survives a restart via
+    /// `meta.json`, and trace upload carries the text to GCS.
+    pub persisted_output_dir: Option<PathBuf>,
 }
 /// Lightweight entry for subagents that have been requested but are still
 /// initializing (creating worktree, resolving config, spawning session).
@@ -583,6 +598,11 @@ pub(crate) struct SubagentCoordinator {
     /// Cleared on freeze/cancel. See AGENTS.md rule 3 for the completeness model.
     subagent_usage_not_applied_prompts: std::collections::HashSet<String>,
 }
+/// Cap on the completed map (entries are small: identity, counts, and an
+/// error string; successful output text lives in `output.json`).
+pub(crate) const MAX_COMPLETED_ENTRIES: usize = 1024;
+/// Served when an entry's `output.json` cannot be read back.
+pub(crate) const OUTPUT_UNAVAILABLE_PLACEHOLDER: &str = "[subagent output no longer available]";
 fn tracker_to_summary(t: &SubagentTracker) -> ActiveSubagentSummary {
     ActiveSubagentSummary {
         subagent_id: t.subagent_id.clone(),
@@ -1944,7 +1964,7 @@ fn cancellation_error_message(
 /// result has not already been consumed (via block-wait or explicit kill).
 /// Also suppressed while the parent's goal loop is active (mirrors the bash
 /// gate in `notification_bridge`); skipping the inject also skips the
-/// `auto_wake_delivered.insert`, leaving surfaces 2/3 free to drain it.
+/// the completion reservation, leaving surfaces 2/3 free to drain it.
 /// `parent_channel_open` folds `inject_subagent_completed_prompt`'s own
 /// no-channel bail into the decision, so the `will_wake` stamped on the
 /// completion notification can never promise a wake the inject won't do.
@@ -1981,7 +2001,9 @@ fn inject_subagent_completed_prompt(
     subagent_id: &str,
     result: &SubagentResult,
     request: &SubagentRequest,
-    auto_wake_delivered: &Option<xai_grok_tools::reminders::task_completion::AutoWakeDeliveredIds>,
+    task_completion_reservations: &Option<
+        xai_grok_tools::reminders::task_completion::TaskCompletionReservations,
+    >,
     parent_cmd_tx: Option<&mpsc::UnboundedSender<SessionCommand>>,
     task_output_tool_name: &str,
     synthetic_trace_tx: &Option<
@@ -1991,8 +2013,8 @@ fn inject_subagent_completed_prompt(
     let Some(cmd_tx) = parent_cmd_tx else {
         return;
     };
-    if let Some(auto_wake) = auto_wake_delivered {
-        auto_wake.insert(subagent_id.to_string());
+    if let Some(reservations) = task_completion_reservations {
+        reservations.reserve(subagent_id.to_string());
     }
     let summary = SubagentCompletionSummary {
         subagent_id: subagent_id.to_string(),
@@ -2021,21 +2043,30 @@ fn inject_subagent_completed_prompt(
     };
     let (respond_to, completion_rx) = tokio::sync::oneshot::channel();
     let prompt_blocks = vec![acp::ContentBlock::Text(acp::TextContent::new(wrapped))];
-    let _ = cmd_tx.send(SessionCommand::Prompt {
-        prompt_id: prompt_id.clone(),
-        prompt_blocks,
-        prompt_mode: crate::session::plan_mode::PromptMode::Agent,
-        artifact_upload_ctx: None,
-        client_identifier: None,
-        screen_mode: None,
-        verbatim: true,
-        traceparent: None,
-        json_schema: None,
-        send_now: false,
-        respond_to,
-        persist_ack: None,
-        parsed_prompt_tx: None,
-    });
+    if cmd_tx
+        .send(SessionCommand::Prompt {
+            prompt_id: prompt_id.clone(),
+            prompt_blocks,
+            prompt_mode: crate::session::plan_mode::PromptMode::Agent,
+            artifact_upload_ctx: None,
+            client_identifier: None,
+            screen_mode: None,
+            verbatim: true,
+            traceparent: None,
+            json_schema: None,
+            send_now: false,
+            admission: None,
+            respond_to,
+            persist_ack: None,
+            parsed_prompt_tx: None,
+        })
+        .is_err()
+    {
+        if let Some(reservations) = task_completion_reservations {
+            reservations.release(subagent_id);
+        }
+        return;
+    }
     if let Some(trace_tx) = synthetic_trace_tx {
         let _ = trace_tx.send(crate::upload::turn::SyntheticTurnTraceRequest {
             session_id: acp::SessionId::new(request.parent_session_id.clone()),
@@ -2131,7 +2162,7 @@ fn fail_subagent(
         duration_ms,
         ..Default::default()
     };
-    update_subagent_meta_completed(subagent_meta_dir, &result, gcs_ctx);
+    persist_subagent_completion(subagent_meta_dir, &result, gcs_ctx);
     emit_subagent_notification(
         gateway,
         parent_session_id,
@@ -2190,7 +2221,7 @@ async fn cancel_pending_subagent_at_promote(
         duration_ms,
         ..Default::default()
     };
-    update_subagent_meta_completed(subagent_meta_dir, &result, gcs_ctx);
+    persist_subagent_completion(subagent_meta_dir, &result, gcs_ctx);
     emit_subagent_notification(
         gateway,
         parent_session_id,
@@ -2552,14 +2583,21 @@ impl SubagentSessionMetadata {
         }
     }
 }
+/// Write via a same-directory temp file and rename, so a crash mid-write
+/// cannot leave a torn `meta.json` or `output.json`.
+fn atomic_write(path: &Path, contents: &str) -> std::io::Result<()> {
+    let parent = path.parent().ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "path has no parent")
+    })?;
+    std::fs::create_dir_all(parent)?;
+    let tmp = tempfile::NamedTempFile::new_in(parent)?;
+    std::fs::write(tmp.path(), contents)?;
+    tmp.persist(path)?;
+    Ok(())
+}
 /// Write `meta.json`. Returns `true` on success so callers on the resume-pointer
 /// path can gate worktree disposal on a durable write.
 fn write_subagent_meta(dir: &Path, meta: &SubagentMeta) -> bool {
-    if let Err(e) = std::fs::create_dir_all(dir) {
-        tracing::warn!(error = % e, "failed to create subagent meta dir");
-        return false;
-    }
-    let meta_path = dir.join("meta.json");
     let json = match serde_json::to_string_pretty(meta) {
         Ok(json) => json,
         Err(e) => {
@@ -2567,11 +2605,62 @@ fn write_subagent_meta(dir: &Path, meta: &SubagentMeta) -> bool {
             return false;
         }
     };
-    if let Err(e) = std::fs::write(&meta_path, json) {
+    if let Err(e) = atomic_write(&dir.join("meta.json"), &json) {
         tracing::warn!(error = % e, "failed to write subagent meta");
         return false;
     }
     true
+}
+/// On-disk schema of `output.json`, written beside `meta.json`.
+#[derive(serde::Deserialize)]
+struct SubagentOutputFile {
+    schema_version: u32,
+    output: String,
+}
+/// Borrowed twin of [`SubagentOutputFile`] so serialization does not copy
+/// the output text.
+#[derive(serde::Serialize)]
+struct SubagentOutputFileRef<'a> {
+    schema_version: u32,
+    output: &'a str,
+}
+const SUBAGENT_OUTPUT_SCHEMA_VERSION: u32 = 1;
+fn write_subagent_output(dir: &Path, output: &str) -> bool {
+    let file = SubagentOutputFileRef {
+        schema_version: SUBAGENT_OUTPUT_SCHEMA_VERSION,
+        output,
+    };
+    let json = match serde_json::to_string(&file) {
+        Ok(json) => json,
+        Err(e) => {
+            tracing::warn!(error = % e, "failed to serialize subagent output");
+            return false;
+        }
+    };
+    if let Err(e) = atomic_write(&dir.join("output.json"), &json) {
+        tracing::warn!(error = % e, "failed to write subagent output");
+        return false;
+    }
+    true
+}
+/// Read back `output.json`. `None` on any read or parse failure.
+pub(crate) fn read_subagent_output(dir: &Path) -> Option<String> {
+    let data = std::fs::read_to_string(dir.join("output.json")).ok()?;
+    let file: SubagentOutputFile = match serde_json::from_str(&data) {
+        Ok(file) => file,
+        Err(e) => {
+            tracing::warn!(error = % e, "failed to parse subagent output.json");
+            return None;
+        }
+    };
+    if file.schema_version != SUBAGENT_OUTPUT_SCHEMA_VERSION {
+        tracing::warn!(
+            found = file.schema_version,
+            expected = SUBAGENT_OUTPUT_SCHEMA_VERSION,
+            "unexpected output.json schema version"
+        );
+    }
+    Some(file.output)
 }
 /// Extra runtime context for GCS artifact upload. `SubagentMeta` doesn't
 /// persist these fields, so they're carried from the spawn site.
@@ -2595,7 +2684,7 @@ struct GcsUploadContext {
 /// any read/parse/write failure is `warn!`-logged (this is the critical resume
 /// pointer) so the caller keeps the worktree rather than removing it without a
 /// recoverable ref. Also re-asserts the terminal `status` so a failed
-/// `update_subagent_meta_completed` write can't leave a non-terminal record that
+/// `persist_subagent_completion` write can't leave a non-terminal record that
 /// `resumable_source_for` rejects after the worktree is removed.
 fn update_subagent_meta_snapshot_ref(dir: &Path, snapshot_ref: &str, status: &str) -> bool {
     let meta_path = dir.join("meta.json");
@@ -2622,7 +2711,12 @@ fn update_subagent_meta_snapshot_ref(dir: &Path, snapshot_ref: &str, status: &st
     meta.status = status.to_string();
     write_subagent_meta(dir, &meta)
 }
-fn update_subagent_meta_completed(dir: &Path, result: &SubagentResult, gcs_ctx: &GcsUploadContext) {
+#[must_use]
+fn persist_subagent_output(dir: &Path, result: &SubagentResult) -> Option<PathBuf> {
+    (result.success && !result.output.is_empty() && write_subagent_output(dir, &result.output))
+        .then(|| dir.to_path_buf())
+}
+fn persist_subagent_completion(dir: &Path, result: &SubagentResult, gcs_ctx: &GcsUploadContext) {
     let meta_path = dir.join("meta.json");
     if let Ok(data) = std::fs::read_to_string(&meta_path)
         && let Ok(mut meta) = serde_json::from_str::<SubagentMeta>(&data)

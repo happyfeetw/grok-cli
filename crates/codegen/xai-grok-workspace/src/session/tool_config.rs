@@ -475,7 +475,7 @@ impl SessionContextFactory for WorkspaceSessionContextFactory {
     }
     fn build_terminal_backend(&self) -> crate::config::SessionTerminalBackend {
         crate::config::SessionTerminalBackend::local(
-            xai_grok_tools::computer::local::LocalTerminalBackend::with_persistent_shell(),
+            xai_grok_tools::computer::local::LocalTerminalBackend::new(),
         )
     }
     fn registry_builder(&self) -> ToolRegistryBuilder {
@@ -497,6 +497,10 @@ fn build_proxy_headers(base_url: &str) -> indexmap::IndexMap<String, String> {
         format!("xai-grok-workspace/{version}"),
     );
     headers.insert("x-grok-client-version".to_string(), version.to_string());
+    headers.insert(
+        "x-grok-client-identifier".to_string(),
+        std::env::var("GROK_CLIENT_NAME").unwrap_or_else(|_| "grok-shell".to_string()),
+    );
     if base_url.contains("cli-chat-proxy") || base_url.contains("chat-proxy") {
         headers.insert("X-XAI-Token-Auth".to_string(), "xai-grok-cli".to_string());
         headers.insert(
@@ -518,12 +522,15 @@ fn build_web_fetch_config() -> xai_grok_tools::implementations::grok_build::web_
     if let Ok(proxy) = std::env::var("GROK_WEB_FETCH_PROXY") {
         params.proxy_endpoint = Some(proxy);
     }
+    if xai_grok_config::env_bool("GROK_WEB_FETCH_ALLOW_LOCAL") == Some(true) {
+        params.allow_local = Some(true);
+    }
     WebFetchConfig::Enabled { params }
 }
 fn default_web_search_model() -> String {
     std::env::var("GROK_WEB_SEARCH_MODEL").unwrap_or_else(|_| "grok-4.20-multi-agent".to_string())
 }
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub mod test_support {
     use crate::config::SessionContextFactory;
     use std::collections::HashMap;

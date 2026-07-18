@@ -7,7 +7,7 @@ use super::interject;
 use super::permissions::drain_permission_queue;
 use super::queue::{
     apply_turn_start_shim, drain_prompt_state_to_last_queued, immediate_server_send_eligible,
-    maybe_drain_queue, push_server_queue_echo, retire_optimistic_echo,
+    maybe_drain_queue, note_peek_page_flip, push_server_queue_echo, retire_optimistic_echo,
 };
 use super::router::dispatch;
 use super::session::fork::open_project_question;
@@ -147,6 +147,36 @@ pub(in crate::app) fn show_small_screen_tip(app: &mut AppView) {
     ) {
         log_event(xai_grok_telemetry::events::ContextualTip {
             tip: xai_grok_telemetry::events::ContextualTipKind::SmallScreen,
+            action: xai_grok_telemetry::events::ContextualTipAction::Shown,
+        });
+    }
+}
+
+/// Show the one-shot "Over SSH? Run `grok wrap ssh <host>` locally…" hint at
+/// the first stable agent-view draw of an unwrapped SSH session (environment
+/// gates live in `AppView::maybe_trigger_ssh_wrap_tip`). Gated by the per-tip
+/// `contextual_hints.ssh_wrap` gate (default ON). Seen-gated in-memory via
+/// `app.tip_seen_counts`; nothing persists to disk.
+///
+/// Called directly from the draw-path trigger — not routed as an `Action`,
+/// so it returns `()` and "no effects from draw" holds structurally.
+pub(in crate::app) fn show_ssh_wrap_tip(app: &mut AppView) {
+    if !app.contextual_hints.ssh_wrap {
+        return;
+    }
+    let ActiveView::Agent(id) = app.active_view else {
+        return;
+    };
+    let Some(agent) = app.agents.get_mut(&id) else {
+        return;
+    };
+    // Impression only when the tip actually takes the slot (mirrors undo/plan).
+    if agent.show_ephemeral_tip(
+        crate::tips::ssh_wrap::ssh_wrap_tip(),
+        &mut app.tip_seen_counts,
+    ) {
+        log_event(xai_grok_telemetry::events::ContextualTip {
+            tip: xai_grok_telemetry::events::ContextualTipKind::SshWrap,
             action: xai_grok_telemetry::events::ContextualTipAction::Shown,
         });
     }
@@ -461,7 +491,7 @@ pub(super) fn dispatch_send_prompt_inner(
                 if let Some(command) = command {
                     if ctx.screen_mode.is_minimal() && !command.available_in_minimal() {
                         // Central minimal gate: commands that drive the deleted
-                        // fullscreen pane / dashboard (/find, /copy, /dashboard)
+                        // fullscreen pane / dashboard (/find, /dashboard, …)
                         // have nothing to act on in scrollback-native mode.
                         // Surface a friendly system block instead of running them.
                         CommandResult::Message(format!(
@@ -765,7 +795,7 @@ pub(super) fn dispatch_send_prompt_inner(
         }
     }
 
-    {
+    let drain = {
         let Some(agent) = app.agents.get_mut(&id) else {
             return effects;
         };
@@ -773,9 +803,7 @@ pub(super) fn dispatch_send_prompt_inner(
         // Insert into local prompt history (move-to-front dedup, cap at 200).
         // Skipped for modal-driven dispatch: the user didn't type these
         // commands and shouldn't see them in up-arrow history.
-        if !consume_input {
-            effects.extend(maybe_drain_queue(agent));
-        } else {
+        if consume_input {
             let trimmed_key = text.trim().to_string();
             if !trimmed_key.is_empty() {
                 agent
@@ -787,9 +815,11 @@ pub(super) fn dispatch_send_prompt_inner(
                     agent.session.prompt_history.truncate(200);
                 }
             }
-            effects.extend(maybe_drain_queue(agent));
         }
-    }
+        maybe_drain_queue(agent)
+    };
+    effects.extend(drain.effects);
+    note_peek_page_flip(app, id, drain.page_flip_entry);
     effects
 }
 
@@ -883,7 +913,9 @@ pub(super) fn dispatch_send_bash_command(app: &mut AppView, command: String) -> 
     agent.session.enqueue_bash_command(command.clone());
     agent.prompt.set_text("");
 
-    maybe_drain_queue(agent)
+    let drain = maybe_drain_queue(agent);
+    note_peek_page_flip(app, id, drain.page_flip_entry);
+    drain.effects
 }
 
 /// Whether a load-result handler must stand down because a reconnect reload
@@ -1064,7 +1096,7 @@ pub(super) fn handle_prompt_response(
             || result
                 .as_ref()
                 .err()
-                .is_some_and(|e| super::billing::is_free_usage_exhausted_error(e));
+                .is_some_and(|e| xai_grok_shell::sampling::error::is_free_usage_exhausted_error(e));
         let model_incompatible = agent.session.model_incompatible;
         // Context overflow: the RetryState handler already pushed the actionable
         // block, so the generic TurnFailed + error toast are redundant. Derived
@@ -1184,7 +1216,6 @@ pub(super) fn handle_prompt_response(
             agent,
             event,
             ending_prompt_id.as_deref(),
-            false,
         );
 
         let notification = match (&result, was_cancelling) {
@@ -1384,19 +1415,24 @@ pub(super) fn handle_prompt_response(
         // turn-start shim. This sets `TurnRunning`, so the
         // `maybe_drain_queue` below no-ops rather than draining a local
         // prompt — the leader owns the drain order.
-        if let Some(p) = pending_adoption
+        let adopted_page_flip = if let Some(p) = pending_adoption
             && agent.session.current_prompt_id.is_none()
         {
             if response_pid.as_deref() != Some(p.prompt_id.as_str())
                 && agent.should_adopt_running_prompt(&p.prompt_id)
             {
-                apply_turn_start_shim(agent, p.prompt_id, p.text, &p.kind);
+                apply_turn_start_shim(agent, p.prompt_id, p.text, &p.kind)
             } else {
                 agent.discard_pending_adoption_updates(&p.prompt_id);
+                None
             }
-        }
+        } else {
+            None
+        };
 
-        let mut effects = maybe_drain_queue(agent);
+        let drain = maybe_drain_queue(agent);
+        let page_flip_entry = adopted_page_flip.or(drain.page_flip_entry);
+        let mut effects = drain.effects;
 
         // Predicted-next-prompt (tab autocomplete): fetch a fresh suggestion
         // (the stale one was wiped above) — but only after a clean, non-bash
@@ -1429,6 +1465,7 @@ pub(super) fn handle_prompt_response(
             agent_id,
             silent: true,
         });
+        note_peek_page_flip(app, agent_id, page_flip_entry);
         return effects;
     }
     vec![]
@@ -1475,7 +1512,9 @@ pub(super) fn handle_compact_complete(
         if app.reconnect_pending {
             return vec![];
         }
-        return maybe_drain_queue(agent);
+        let drain = maybe_drain_queue(agent);
+        note_peek_page_flip(app, agent_id, drain.page_flip_entry);
+        return drain.effects;
     }
     vec![]
 }

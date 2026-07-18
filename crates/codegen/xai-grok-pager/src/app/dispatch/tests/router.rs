@@ -1,5 +1,31 @@
 //! Tests for the action router, model switching, slash commands, and other cross-cutting dispatch behavior.
 use super::*;
+#[test]
+fn auth_copy_dispatch_preserves_all_delivery_states() {
+    for delivery in [
+        crate::clipboard::ClipboardDelivery::Confirmed,
+        crate::clipboard::ClipboardDelivery::Unverified,
+        crate::clipboard::ClipboardDelivery::Failed,
+    ] {
+        let mut app = test_app();
+        app.auth_state = AuthState::Authenticating {
+            request_seq: 1,
+            handle: None,
+            auth_url: Some("https://grok.com/auth".to_owned()),
+            mode: AuthMode::Command,
+        };
+        let effects = crate::app::dispatch::router::dispatch_copy_auth_url(&mut app, |url| {
+            assert_eq!(url, "https://grok.com/auth");
+            delivery
+        });
+        assert_eq!(app.auth_clipboard_delivery, Some(delivery));
+        assert_eq!(app.auth_clipboard_feedback_generation, 1);
+        assert!(matches!(
+            effects.as_slice(),
+            [Effect::ScheduleClearAuthCopyFeedback { generation: 1 }]
+        ));
+    }
+}
 fn seed_foreign_resume_hint(
     app: &mut AppView,
     tool: xai_grok_workspace::foreign_sessions::ForeignSessionTool,
@@ -2104,8 +2130,6 @@ fn mouse_click_on_peek_close_rect_clears_peek() {
             time_ago: String::new(),
             response_type: "Idle".into(),
             last_user_message: None,
-            last_agent_lines: Vec::new(),
-            last_response_truncated: false,
             question: None,
             options: Vec::new(),
             request_id: None,

@@ -5,7 +5,7 @@ use super::auth::{
 };
 use super::billing::dispatch_open_supergrok_url;
 use super::ctx::{
-    active_agent_session_id, get_active_agent_mut, navigate_clearing_selection,
+    active_agent_session_id, get_active_agent_mut, navigate_clearing_selection, open_url_or_show,
     sync_sleep_inhibitor, with_active_agent, with_scrollback,
 };
 use super::dashboard::{
@@ -77,14 +77,15 @@ use super::settings::setters::{
     preview_auto_light_theme, preview_theme, set_ask_user_question_timeout_enabled,
     set_auto_dark_theme, set_auto_light_theme, set_auto_update, set_collapsed_edit_blocks,
     set_compact_mode, set_contextual_hint_image_input, set_contextual_hint_plan_mode,
-    set_contextual_hint_send_now, set_contextual_hint_small_screen, set_contextual_hint_undo,
-    set_contextual_hint_word_select, set_default_model, set_default_selected_permission,
-    set_display_refresh_auto_cadence, set_fork_secondary_model, set_group_tool_verbs,
-    set_hunk_tracker_mode, set_invert_scroll, set_keep_text_selection, set_max_thoughts_width,
-    set_multiline_mode, set_prompt_suggestions, set_remember_tool_approvals, set_render_mermaid,
-    set_respect_manual_folds, set_screen_mode, set_scroll_lines, set_scroll_mode, set_scroll_speed,
-    set_show_thinking_blocks, set_show_tips, set_simple_mode, set_theme, set_timeline,
-    set_timestamps, set_vim_mode, set_voice_capture_mode, set_voice_stt_language,
+    set_contextual_hint_send_now, set_contextual_hint_small_screen, set_contextual_hint_ssh_wrap,
+    set_contextual_hint_undo, set_contextual_hint_word_select, set_default_model,
+    set_default_selected_permission, set_display_refresh_auto_cadence, set_fork_secondary_model,
+    set_group_tool_verbs, set_hunk_tracker_mode, set_invert_scroll, set_keep_text_selection,
+    set_max_thoughts_width, set_multiline_mode, set_page_flip_on_send, set_prompt_suggestions,
+    set_remember_tool_approvals, set_render_mermaid, set_respect_manual_folds, set_screen_mode,
+    set_scroll_lines, set_scroll_mode, set_scroll_speed, set_show_thinking_blocks, set_show_tips,
+    set_simple_mode, set_theme, set_timeline, set_timestamps, set_vim_mode, set_voice_capture_mode,
+    set_voice_stt_language,
 };
 use super::settings::ui::{
     dispatch_confirm_reset_setting, dispatch_open_command_palette, dispatch_open_howto_guides,
@@ -116,6 +117,23 @@ use crate::app::app_view::{ActiveView, AppView, AuthState};
 use crate::scrollback::types::DisplayMode;
 use crate::views::session_picker::CONTENT_EXPAND_OFFSET;
 use xai_grok_telemetry::session_ctx::log_event;
+pub(super) fn dispatch_copy_auth_url(
+    app: &mut AppView,
+    copy: impl FnOnce(&str) -> crate::clipboard::ClipboardDelivery,
+) -> Vec<Effect> {
+    let AuthState::Authenticating {
+        auth_url: Some(url),
+        ..
+    } = &app.auth_state
+    else {
+        return vec![];
+    };
+    app.auth_clipboard_delivery = Some(copy(url));
+    app.auth_clipboard_feedback_generation = app.auth_clipboard_feedback_generation.wrapping_add(1);
+    vec![Effect::ScheduleClearAuthCopyFeedback {
+        generation: app.auth_clipboard_feedback_generation,
+    }]
+}
 /// Dispatch an action: mutate state, return effects to execute.
 ///
 /// The returned `Vec<Effect>` may be empty (pure state mutation) or contain
@@ -583,10 +601,7 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
                     surface: xai_grok_telemetry::events::CreditLimitUpsellSurface::InlineCard,
                     choice,
                 });
-                crate::app::link_opener::open_url_if_safe(
-                    &url,
-                    crate::terminal::hyperlinks::SchemeFilter::Standard,
-                );
+                open_url_or_show(app, &url);
             } else {
                 dispatch_open_block_viewer(app);
             }
@@ -613,6 +628,26 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
                 agent_id: id,
                 session_id,
                 server_name,
+            }]
+        }
+        Action::McpSetupSubmit {
+            server_name,
+            values,
+        } => {
+            let ActiveView::Agent(id) = app.active_view else {
+                return vec![];
+            };
+            let Some(agent) = app.agents.get_mut(&id) else {
+                return vec![];
+            };
+            let Some(session_id) = agent.session.session_id.clone() else {
+                return vec![];
+            };
+            vec![Effect::McpSetupSubmit {
+                agent_id: id,
+                session_id,
+                server_name,
+                values,
             }]
         }
         Action::ReloadSkills => {
@@ -849,16 +884,17 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
             }
         }
         Action::AnnouncementsOpenCta(surface) => {
-            use crate::terminal::hyperlinks::SchemeFilter;
             if let Some((promo, url)) = crate::views::announcements::promo_cta_target(
                 &app.active_announcements,
                 &app.hidden_announcement_ids,
             ) {
+                let url = url.to_owned();
+                let promo_id = promo.id.clone();
                 log_event(xai_grok_telemetry::events::AnnouncementCtaClicked {
-                    id: promo.id.clone(),
+                    id: promo_id,
                     source: surface,
                 });
-                crate::app::link_opener::open_url_if_safe(url, SchemeFilter::Standard);
+                open_url_or_show(app, &url);
             }
             vec![]
         }
@@ -927,6 +963,7 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::SetCompactMode(v) => set_compact_mode(app, v),
         Action::SetTimestamps(v) => set_timestamps(app, v),
         Action::SetTimeline(v) => set_timeline(app, v),
+        Action::SetPageFlipOnSend(v) => set_page_flip_on_send(app, v),
         Action::SetSimpleMode(v) => set_simple_mode(app, v),
         Action::SetContextualHintUndo(v) => set_contextual_hint_undo(app, v),
         Action::SetContextualHintPlanMode(v) => set_contextual_hint_plan_mode(app, v),
@@ -934,6 +971,7 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::SetContextualHintSendNow(v) => set_contextual_hint_send_now(app, v),
         Action::SetContextualHintSmallScreen(v) => set_contextual_hint_small_screen(app, v),
         Action::SetContextualHintWordSelect(v) => set_contextual_hint_word_select(app, v),
+        Action::SetContextualHintSshWrap(v) => set_contextual_hint_ssh_wrap(app, v),
         Action::SetTheme(v) => set_theme(app, v),
         Action::SetAutoDarkTheme(v) => set_auto_dark_theme(app, v),
         Action::SetAutoLightTheme(v) => set_auto_light_theme(app, v),
@@ -962,7 +1000,6 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::CheckSubscription => vec![Effect::CheckSubscription { verify: None }],
         Action::OpenSupergrokUrl => dispatch_open_supergrok_url(app),
         Action::OpenUrl(url) => {
-            use crate::terminal::hyperlinks::SchemeFilter;
             if url.starts_with("file://") {
                 let opened = url::Url::parse(&url)
                     .ok()
@@ -974,14 +1011,31 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
                     "Could not open file"
                 });
             } else {
-                crate::app::link_opener::open_url_if_safe(&url, SchemeFilter::Standard);
+                open_url_or_show(app, &url);
+            }
+            vec![]
+        }
+        Action::OpenLink(target) => {
+            use crate::render::osc8::LinkTarget;
+            match crate::render::osc8::resolve_link_open_target(&target) {
+                Some(LinkTarget::File(path)) => {
+                    let opened = crate::app::link_opener::open_path(&path);
+                    app.show_toast(if opened {
+                        "Opening in default app\u{2026}"
+                    } else {
+                        "Could not open file"
+                    });
+                }
+                Some(LinkTarget::Url(url)) => {
+                    crate::app::link_opener::open_url(&url);
+                }
+                None => {}
             }
             vec![]
         }
         Action::OpenManagedConnectors => {
-            use crate::terminal::hyperlinks::SchemeFilter;
             let url = crate::views::mcps_modal::managed_connectors_url(app.team_id.as_deref());
-            crate::app::link_opener::open_url_if_safe(&url, SchemeFilter::Standard);
+            open_url_or_show(app, &url);
             vec![]
         }
         Action::OpenNextLink => {
@@ -996,18 +1050,7 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::CancelLogin => dispatch_cancel_login(app),
         Action::SubmitAuthCode(code) => dispatch_submit_auth_code(app, code),
         Action::CopyAuthUrl => {
-            if let AuthState::Authenticating {
-                auth_url: Some(url),
-                ..
-            } = &app.auth_state
-            {
-                app.auth_clipboard_copied = crate::clipboard::SystemClipboard::try_set(url);
-            }
-            if app.auth_clipboard_copied {
-                vec![Effect::ScheduleClearAuthCopied]
-            } else {
-                vec![]
-            }
+            dispatch_copy_auth_url(app, crate::clipboard::SystemClipboard::try_set)
         }
         Action::ShowRawAuthUrl => {
             app.auth_show_raw_url = true;
@@ -1144,14 +1187,6 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::DashboardCancelRename => {
             if let Some(d) = app.dashboard.as_mut() {
                 d.rename = None;
-            }
-            vec![]
-        }
-        Action::DashboardRenameInput(text) => {
-            if let Some(d) = app.dashboard.as_mut()
-                && let Some(rn) = d.rename.as_mut()
-            {
-                rn.draft = text;
             }
             vec![]
         }

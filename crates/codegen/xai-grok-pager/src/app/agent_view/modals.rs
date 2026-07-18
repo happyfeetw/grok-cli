@@ -79,6 +79,16 @@ impl AgentView {
         }
     }
 
+    pub(super) fn handle_agents_modal_paste(&mut self, text: &str) -> InputOutcome {
+        let Some(ref mut state) = self.agents_modal else {
+            return InputOutcome::Unchanged;
+        };
+        match crate::views::agents_modal::handle_agents_paste(state, text) {
+            crate::views::agents_modal::AgentsModalOutcome::Changed => InputOutcome::Changed,
+            _ => InputOutcome::Unchanged,
+        }
+    }
+
     pub(super) fn handle_agents_modal_mouse(
         &mut self,
         mouse: &crossterm::event::MouseEvent,
@@ -130,6 +140,16 @@ impl AgentView {
             }
             PersonaDetailOutcome::Changed => InputOutcome::Changed,
             PersonaDetailOutcome::Unchanged => InputOutcome::Unchanged,
+        }
+    }
+
+    pub(super) fn handle_persona_detail_paste(&mut self, text: &str) -> InputOutcome {
+        let Some(ref mut detail) = self.persona_detail else {
+            return InputOutcome::Unchanged;
+        };
+        match crate::views::persona_detail::handle_persona_detail_paste(detail, text) {
+            crate::views::persona_detail::PersonaDetailOutcome::Changed => InputOutcome::Changed,
+            _ => InputOutcome::Unchanged,
         }
     }
 
@@ -382,7 +402,14 @@ impl AgentView {
             };
         }
 
-        // If in input mode, route to input handler.
+        // If in setup or input mode, route to the form handler.
+        if self
+            .extensions_modal
+            .as_ref()
+            .is_some_and(|s| s.mcp_setup.is_some())
+        {
+            return self.handle_mcp_setup_key(key);
+        }
         if self
             .extensions_modal
             .as_ref()
@@ -490,7 +517,7 @@ impl AgentView {
                 crate::views::modal_window::handle_modal_key(&mut state.window, key, &config);
             match outcome {
                 crate::views::modal_window::ModalWindowOutcome::CloseRequested => {
-                    if state.picker_state.query.is_empty() && !state.picker_state.search_active {
+                    if state.picker_state.query().is_empty() && !state.picker_state.search_active {
                         self.extensions_modal = None;
                         return InputOutcome::Changed;
                     }
@@ -733,8 +760,43 @@ impl AgentView {
             }
             crate::views::picker::PickerOutcome::Copy(_) => InputOutcome::Changed,
             crate::views::picker::PickerOutcome::SubmitQuery => InputOutcome::Changed,
-            crate::views::picker::PickerOutcome::Changed => InputOutcome::Changed,
+            crate::views::picker::PickerOutcome::Changed
+            | crate::views::picker::PickerOutcome::QueryChanged => InputOutcome::Changed,
             crate::views::picker::PickerOutcome::Unchanged => InputOutcome::Unchanged,
+        }
+    }
+
+    fn handle_mcp_setup_key(&mut self, key: &KeyEvent) -> InputOutcome {
+        use crate::views::extensions_modal::McpSetupOutcome;
+
+        let Some(ref mut state) = self.extensions_modal else {
+            return InputOutcome::Unchanged;
+        };
+        let Some(ref mut setup) = state.mcp_setup else {
+            return InputOutcome::Unchanged;
+        };
+
+        match setup.handle_key(key) {
+            McpSetupOutcome::Changed => InputOutcome::Changed,
+            McpSetupOutcome::Unchanged => InputOutcome::Unchanged,
+            McpSetupOutcome::Cancel => {
+                state.mcp_setup = None;
+                InputOutcome::Changed
+            }
+            McpSetupOutcome::Submit => {
+                let Some(values) = setup.values() else {
+                    setup.error = Some("Select an option".to_string());
+                    return InputOutcome::Changed;
+                };
+                let server_name = setup.server_name.clone();
+                state.mcp_setup = None;
+                state.pending_action = Some(format!("Authenticating {server_name}..."));
+                state.pending_entry_index = None;
+                InputOutcome::Action(Action::McpSetupSubmit {
+                    server_name,
+                    values,
+                })
+            }
         }
     }
 
@@ -780,9 +842,13 @@ impl AgentView {
     /// paste shortcut (Cmd-V / Shift-Insert) is swallowed because the modal
     /// intercept only routes `Event::Key` and `Event::Mouse` by default.
     pub(super) fn handle_extensions_modal_paste(&mut self, text: &str) -> InputOutcome {
-        if let Some(ref mut state) = self.extensions_modal
-            && state.apply_paste(text)
-        {
+        let Some(ref mut state) = self.extensions_modal else {
+            return InputOutcome::Unchanged;
+        };
+        if state.modal_message.is_some() || state.pending_action.is_some() {
+            return InputOutcome::Unchanged;
+        }
+        if state.apply_paste(text) {
             InputOutcome::Changed
         } else {
             InputOutcome::Unchanged
@@ -1070,7 +1136,8 @@ impl AgentView {
                 );
                 InputOutcome::Changed
             }
-            crate::views::picker::PickerOutcome::Changed => InputOutcome::Changed,
+            crate::views::picker::PickerOutcome::Changed
+            | crate::views::picker::PickerOutcome::QueryChanged => InputOutcome::Changed,
             crate::views::picker::PickerOutcome::Unchanged => InputOutcome::Unchanged,
             _ => InputOutcome::Changed,
         }
@@ -1407,6 +1474,14 @@ impl AgentView {
                     {
                         if server.is_managed_gateway {
                             return InputOutcome::Action(Action::OpenManagedConnectors);
+                        }
+                        if server.setup_required
+                            && let Some(form) =
+                                crate::views::extensions_modal::McpSetupFormState::new(server)
+                        {
+                            state.mcp_setup = Some(form);
+                            state.picker_state.search_active = false;
+                            return InputOutcome::Changed;
                         }
                         // Drop repeats while an action is in flight on the same
                         // row to avoid double-spawning the OAuth browser flow.
@@ -1796,7 +1871,7 @@ impl AgentView {
                                     .position(|h| {
                                         crate::views::extensions_modal::fuzzy_matches_hook(
                                             h,
-                                            &state.picker_state.query,
+                                            state.picker_state.query(),
                                         ) && new_filter.matches(!h.disabled)
                                     })
                                     .unwrap_or(0);
@@ -2067,6 +2142,9 @@ mod extensions_action_target_tests {
             status: crate::views::mcps_modal::McpServerDisplayStatus::Initializing,
             tool_count: 0,
             auth_required: false,
+            setup_required: false,
+            setup: None,
+            setup_values: std::collections::HashMap::new(),
             tools: Vec::new(),
             enabled,
             source: "local".into(),
@@ -2417,7 +2495,7 @@ mod extensions_modal_search_key_tests {
             !state.picker_state.search_active,
             "Esc should deactivate search"
         );
-        assert!(state.picker_state.query.is_empty());
+        assert!(state.picker_state.query().is_empty());
     }
 
     #[test]
@@ -2458,7 +2536,7 @@ mod extensions_modal_search_key_tests {
         {
             let state = agent.extensions_modal.as_ref().unwrap();
             assert!(state.picker_state.search_active);
-            assert_eq!(state.picker_state.query, "a");
+            assert_eq!(state.picker_state.query(), "a");
         }
 
         agent.handle_extensions_modal_key(&key(KeyCode::Esc));
@@ -2468,7 +2546,7 @@ mod extensions_modal_search_key_tests {
                 .as_ref()
                 .expect("modal stays open while a query is present");
             assert!(!state.picker_state.search_active);
-            assert_eq!(state.picker_state.query, "a");
+            assert_eq!(state.picker_state.query(), "a");
         }
 
         agent.handle_extensions_modal_key(&key(KeyCode::Esc));
@@ -2478,7 +2556,7 @@ mod extensions_modal_search_key_tests {
                 .as_ref()
                 .expect("clearing the retained query keeps the modal open");
             assert!(!state.picker_state.search_active);
-            assert!(state.picker_state.query.is_empty());
+            assert!(state.picker_state.query().is_empty());
         }
 
         agent.handle_extensions_modal_key(&key(KeyCode::Esc));
@@ -2508,7 +2586,8 @@ mod extensions_modal_search_key_tests {
             "search stays active across a tab switch"
         );
         assert_eq!(
-            state.picker_state.query, "g",
+            state.picker_state.query(),
+            "g",
             "the query carries over to the new tab"
         );
     }
@@ -2525,7 +2604,7 @@ mod extensions_modal_search_key_tests {
         let state = agent.extensions_modal.as_ref().unwrap();
         assert_eq!(state.active_tab, ExtensionsTab::Hooks);
         assert!(state.picker_state.search_active);
-        assert_eq!(state.picker_state.query, "g");
+        assert_eq!(state.picker_state.query(), "g");
     }
 
     #[test]
@@ -2540,7 +2619,7 @@ mod extensions_modal_search_key_tests {
         let state = agent.extensions_modal.as_ref().unwrap();
         assert_eq!(state.active_tab, ExtensionsTab::Hooks);
         assert!(state.picker_state.search_active);
-        assert_eq!(state.picker_state.query, "g");
+        assert_eq!(state.picker_state.query(), "g");
     }
 
     #[test]
@@ -2576,6 +2655,9 @@ mod connectors_url_click_tests {
             status: McpServerDisplayStatus::Ready,
             tool_count: 0,
             auth_required: false,
+            setup_required: false,
+            setup: None,
+            setup_values: std::collections::HashMap::new(),
             tools: vec![],
             enabled: true,
             source: "managed".into(),
@@ -2698,5 +2780,77 @@ mod connectors_url_click_tests {
             outcome,
             InputOutcome::Action(Action::OpenManagedConnectors)
         ));
+    }
+}
+
+#[cfg(test)]
+mod editor_paste_routing_tests {
+    use std::collections::HashMap;
+
+    use super::test_fixtures::make_agent;
+    use crate::actions::ActionRegistry;
+    use crate::app::bundle::BundleState;
+    use crate::views::agents_modal::{AgentsModalState, AgentsTab};
+    use crate::views::extensions_modal::{
+        ExtensionsModalState, ExtensionsTab, FieldSpec, ModalInput,
+    };
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+
+    #[test]
+    fn persona_and_extensions_paste_only_into_active_forms() {
+        let registry = ActionRegistry::defaults();
+        let mut agent = make_agent();
+        agent.prompt.set_text("hidden prompt");
+
+        let cwd = tempfile::tempdir().expect("temp cwd");
+        let mut agents = AgentsModalState::new(
+            cwd.path(),
+            &HashMap::new(),
+            &BundleState::default(),
+            None,
+            None,
+        );
+        agents.active_tab = AgentsTab::Personas;
+        agent.agents_modal = Some(agents);
+        let _ = agent.handle_input(
+            &Event::Key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE)),
+            &registry,
+        );
+        let _ = agent.handle_input(&Event::Paste("na\r\nme".to_owned()), &registry);
+        assert_eq!(
+            agent
+                .agents_modal
+                .as_ref()
+                .and_then(|state| state.persona_input.as_ref())
+                .map(|input| input.name()),
+            Some("name")
+        );
+        assert_eq!(agent.prompt.text(), "hidden prompt");
+
+        agent.agents_modal = None;
+        let mut extensions = ExtensionsModalState::new(ExtensionsTab::McpServers);
+        extensions.input = Some(ModalInput::from_specs(
+            "mcp add".to_owned(),
+            vec![FieldSpec {
+                label: "URL".to_owned(),
+                required: true,
+                placeholder: None,
+            }],
+        ));
+        agent.extensions_modal = Some(extensions);
+        let _ = agent.handle_input(
+            &Event::Paste("https://example.test\r\n".to_owned()),
+            &registry,
+        );
+        assert_eq!(
+            agent
+                .extensions_modal
+                .as_ref()
+                .and_then(|state| state.input.as_ref())
+                .and_then(|input| input.field(0))
+                .map(|field| field.text()),
+            Some("https://example.test")
+        );
+        assert_eq!(agent.prompt.text(), "hidden prompt");
     }
 }

@@ -62,7 +62,7 @@ use xai_grok_sampling_types::{
     supports_reasoning_effort_meta,
 };
 use crate::agent::update_chunk_merge;
-use crate::auth::{AuthManager, AuthUrlInfo};
+use crate::auth::AuthManager;
 use crate::config::StorageMode;
 use crate::extensions::notification::{SessionNotification, SessionUpdate};
 use xai_grok_telemetry::id::{agent_id, agent_instance_id};
@@ -614,19 +614,14 @@ pub struct MvpAgent {
     loading_sessions: RefCell<
         HashMap<acp::SessionId, tokio::sync::watch::Receiver<bool>>,
     >,
-    /// Per-session prompt-intake serialization lock. LEADER-SAFE(per-session):
-    /// keyed by SessionId, mirrors `sessions` lifecycle.
-    ///
-    /// Each incoming `session/prompt` RPC is dispatched as its own task by the
-    /// ACP message loop, and [`Self::prompt`] runs an async preamble (prompt-mode
-    /// query, trace context, model lookup) BEFORE it enqueues
-    /// `SessionCommand::Prompt` onto the actor's FIFO mailbox. Without
-    /// serialization those preambles interleave across tasks, so the mailbox —
-    /// and therefore the authoritative prompt queue — receives prompts out of
-    /// submission order. `prompt()` holds this lock across the preamble and
-    /// releases it immediately after the enqueue (the turn itself runs unlocked),
-    /// which makes intake order match arrival order.
-    prompt_intake_locks: RefCell<
+    /// Per-session lock ordering dispatch onto the actor's mailbox:
+    /// [`Self::prompt`] holds it across its intake preamble and
+    /// [`Self::cancel`] around its `Cancel` send, so prompts land in
+    /// submission order and a cancel cannot overtake the prompt it targets
+    /// (see `cancel_never_overtakes_in_flight_prompt_intake`). Cancels wait
+    /// out preambles held ahead of them — keep preambles lean; bridge cancels
+    /// are unordered. LEADER-SAFE(per-session): mirrors `sessions` lifecycle.
+    dispatch_locks: RefCell<
         HashMap<acp::SessionId, std::rc::Rc<tokio::sync::Mutex<()>>>,
     >,
     /// LEADER-SAFE(per-session): keyed by SessionId. Mirrors `sessions` lifecycle.
@@ -654,10 +649,11 @@ pub struct MvpAgent {
     /// grok.com chat-product catalog (`/rest/modes`) for chat sessions; distinct
     /// from `models_manager` (the build `/v1/models` catalog).
     pub(crate) chat_modes: crate::agent::chat_modes::ChatModesManager,
-    /// Forwards pasted codes from `handle_auth_submit_code` to the auth flow.
-    pub(crate) auth_code_tx: RefCell<Option<tokio::sync::mpsc::Sender<String>>>,
-    /// Receives the auth URL from the auth flow; read by `handle_auth_get_url`.
-    pub(crate) auth_url_rx: RefCell<Option<tokio::sync::oneshot::Receiver<AuthUrlInfo>>>,
+    /// Single-flight guard for interactive login (device poll / loopback
+    /// wait). Owns the active attempt's cancel token and its code/url
+    /// channels; a new `authenticate` or `x.ai/auth/cancel` cancels the
+    /// prior attempt.
+    pub(crate) interactive_auth: crate::auth::single_flight::AuthSingleFlight,
     /// Client type. LEADER-SAFE(init-once): set once during `initialize` from
     /// `_meta.clientIdentifier` (injected by the IPC server in leader mode).
     ///
@@ -736,8 +732,10 @@ pub struct MvpAgent {
     /// Context for managing background copy operations (e.g., copying ignored files)
     pub(crate) background_copy_context: BackgroundCopyContext,
     /// LEADER-SAFE(per-session): keyed by SessionId, no cross-session iteration.
+    /// Released by `remove_session`.
     pub(crate) session_turn_numbers: RefCell<HashMap<acp::SessionId, u64>>,
     /// LEADER-SAFE(per-session): keyed by SessionId, no cross-session iteration.
+    /// Released by `remove_session`.
     permission_event_receivers: RefCell<
         HashMap<acp::SessionId, tokio::sync::mpsc::UnboundedReceiver<PermissionEvent>>,
     >,
@@ -772,7 +770,7 @@ pub struct MvpAgent {
     /// transiently degraded when a reconnect replays `session/load` (e.g.
     /// fetch still in flight after a leader restart), so the prompt path
     /// re-checks and self-heals — or (b) the user explicitly switches
-    /// models via `set_session_model`.
+    /// models via `set_session_model`. Released by `remove_session`.
     model_unavailable_sessions: RefCell<std::collections::HashMap<String, acp::ModelId>>,
     /// Unified sender for all subagent coordinator events.
     /// LEADER-SAFE(shared): channel is multi-producer, coordinator drains.
@@ -796,20 +794,6 @@ pub struct MvpAgent {
     /// notification has `Next` priority. Drained by the session turn loop
     /// (`inject_pending_monitor_events`) into a hidden synthetic user message.
     monitor_event_buffer: xai_grok_tools::implementations::grok_build::task::types::MonitorEventBuffer,
-    /// Per-subagent model ID overrides from config.toml `[subagents.models]`.
-    /// Populated from `SubagentsConfig.models` during `with_models()`.
-    subagent_model_overrides: std::collections::HashMap<String, String>,
-    /// Per-subagent enable/disable toggles from config.toml `[subagents.toggle]`.
-    /// Populated from `SubagentsConfig.toggle` during `with_models()`.
-    subagent_toggle: std::collections::HashMap<String, bool>,
-    subagent_roles: std::collections::HashMap<
-        String,
-        xai_grok_subagent_resolution::config::SubagentRole,
-    >,
-    subagent_personas: std::collections::HashMap<
-        String,
-        xai_grok_subagent_resolution::config::SubagentPersona,
-    >,
     /// The process launch directory, captured once at construction so the
     /// deferred launch-dir init paths share one source of truth instead of each
     /// re-calling `std::env::current_dir()` (which could drift if the process
@@ -829,7 +813,6 @@ pub struct MvpAgent {
     /// the first session-creating call via [`Self::ensure_plugin_registry`];
     /// this flag keeps that to a single discovery walk.
     plugin_registry_initialized: std::cell::Cell<bool>,
-    persona_io_summaries: Vec<String>,
     /// Single-flight guard for the proactive bundle sync background task.
     ///
     /// `maybe_sync_bundle_in_background` is invoked from each post-auth path
@@ -1125,6 +1108,10 @@ struct AuthRequestMeta {
     /// user abandons the browser flow, the current session continues.
     #[serde(default)]
     force_interactive: bool,
+    /// Pager auth `request_seq` for this attempt. Scopes `x.ai/auth/cancel`
+    /// so a delayed cancel cannot tear down a successor login.
+    #[serde(default)]
+    request_seq: Option<u64>,
 }
 impl AuthRequestMeta {
     /// `--oauth` → force loopback; otherwise default (loopback).
@@ -1174,6 +1161,9 @@ fn inject_proxy_headers(
                 .map(String::from)
                 .unwrap_or_else(|| xai_grok_version::VERSION.to_string())
         });
+    headers
+        .entry("x-grok-client-identifier".to_string())
+        .or_insert_with(crate::http::process_client_identifier);
     if crate::util::is_cli_chat_proxy_url(base_url) {
         headers
             .entry("X-XAI-Token-Auth".to_string())
@@ -1262,6 +1252,7 @@ mod session_lifecycle;
 mod subagent_coordinator;
 mod agent_ops;
 mod acp_agent;
+pub(crate) use session_lifecycle::RegistrySnapshot;
 pub(super) use super::ext_parsers;
 /// Emit the `auth.lifecycle` login span with optional user id and error
 /// category. Named `auth.lifecycle` (not `auth`) to avoid colliding with the
@@ -2286,11 +2277,8 @@ async fn handle_synthetic_turn_trace(
             model,
         )
     };
-    let trace_context = {
-        let this = agent_ref.get();
-        let ctx = this.get_trace_context(&info, turn_number).await;
-        ctx
-    };
+    let this = agent_ref.get();
+    let trace_context = this.get_trace_context(&info, turn_number).await;
     let Some(ctx) = trace_context else {
         tracing::info!(
             session_id = % request.session_id.0, prompt_id = % request.prompt_id,

@@ -14,6 +14,12 @@ packaging, branding, and distribution.
 
 ## [Unreleased]
 
+### Changed
+
+- Merged upstream `xai-org/grok-build` (three monorepo sync commits; latest
+  `SOURCE_REV` / upstream shell ~0.2.105). Kept fork product naming (`grok-cli`,
+  `@spikewang/grok-cli`, system-proxy packaging) and resume/update branding.
+
 ## [0.1.227] - 2026-07-18
 
 ### Fixed

@@ -200,6 +200,11 @@ async fn run_setup_command(json: bool) {
                 "Your team doesn't have a managed configuration yet. A team admin can set one up at console.x.ai."
             );
         }
+        SetupOutcome::Skipped => {
+            eprintln!(
+                "Managed configuration was not applied this run (another process held the apply lock, or the credential changed during the fetch). Run `grok setup` again."
+            );
+        }
         SetupOutcome::Failed(e) => {
             eprintln!("Couldn't apply managed configuration. {e}");
             std::process::exit(1);
@@ -945,6 +950,41 @@ fn shutdown_and_flush_telemetry(exit_code: i32) -> ! {
     xai_grok_telemetry::debug_log::flush();
     std::process::exit(exit_code);
 }
+async fn forward_stdio_line_to_leader(
+    line: Vec<u8>,
+    leader_tx: &tokio::sync::Mutex<tokio::sync::mpsc::UnboundedSender<String>>,
+    replay_state: &std::sync::Mutex<StdioReplayState>,
+    cancel: &CancellationToken,
+) {
+    let line = String::from_utf8_lossy(&line);
+    let mut trimmed = line.trim_end_matches(['\r', '\n']).to_string();
+    if trimmed.is_empty() {
+        return;
+    }
+    if trimmed.contains("\"initialize\"")
+        || trimmed.contains("\"session/load\"")
+        || trimmed.contains("\"session/new\"")
+    {
+        cache_outgoing_acp_state(&trimmed, replay_state);
+    }
+    let send_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(300);
+    loop {
+        {
+            let tx = leader_tx.lock().await;
+            match tx.send(trimmed) {
+                Ok(()) => break,
+                Err(tokio::sync::mpsc::error::SendError(v)) => trimmed = v,
+            }
+        }
+        if cancel.is_cancelled() || tokio::time::Instant::now() >= send_deadline {
+            tracing::error!(
+                "stdio bridge: dropping client message after reconnect retries were exhausted"
+            );
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    }
+}
 /// Emitted by both leader guards (server mode and leader-connect) so the two sites
 /// can't drift.
 const PLUGIN_DIR_LEADER_WARNING: &str = "grok: --plugin-dir is ignored in leader mode; run with --no-leader to \
@@ -962,16 +1002,11 @@ async fn run_agent_command(
         #[cfg(unix)]
         {
             use tokio::signal::unix::{SignalKind, signal};
+            use xai_grok_pager::app::signal_handler::next_signal_code;
             let mut term = signal(SignalKind::terminate()).ok();
             let mut hup = signal(SignalKind::hangup()).ok();
-            tokio::select! {
-                _ = tokio::signal::ctrl_c() => { shutdown_and_flush_telemetry(130); } _ =
-                async { if let Some(sig) = term.as_mut() { let _ = sig.recv(). await; }
-                else { std::future::pending::< () > (). await; } } => {
-                shutdown_and_flush_telemetry(143); } _ = async { if let Some(sig) = hup
-                .as_mut() { let _ = sig.recv(). await; } else { std::future::pending::<
-                () > (). await; } } => { shutdown_and_flush_telemetry(129); }
-            }
+            let code = next_signal_code(&mut term, &mut hup).await;
+            shutdown_and_flush_telemetry(code);
         }
         #[cfg(not(unix))]
         {
@@ -1056,7 +1091,6 @@ async fn run_agent_command(
     agent_config.resolve_runtime_fields(&xai_grok_shell::agent::config::RuntimeResolutionContext {
         raw_config: &raw_config,
         remote_settings: remote_settings.as_ref(),
-        cwd: None,
         is_headless: !is_leader,
         cli_subagents: None,
         cli_web_search_model: None,
@@ -1081,9 +1115,16 @@ async fn run_agent_command(
         leader_eligible,
     );
     tracing::info!(use_leader, ?policy_disable_reason, "leader mode resolved");
-    if stdio_direct_update_eligible(is_stdio, use_leader)
-        && should_check_for_updates(no_auto_update)
-    {
+    let managed_install = is_managed_install(
+        std::env::current_exe().ok(),
+        &xai_grok_shell::util::grok_home::grok_home(),
+    );
+    if stdio_auto_update_enabled(
+        is_stdio,
+        use_leader,
+        should_check_for_updates(no_auto_update),
+        managed_install,
+    ) {
         let update_config = update_config.clone();
         tokio::spawn(async move {
             auto_update::run_update_if_available(
@@ -1094,6 +1135,8 @@ async fn run_agent_command(
             .await
             .ok();
         });
+    } else if is_stdio && !use_leader && !managed_install {
+        tracing::debug!("stdio auto-update skipped: not the managed install");
     }
     if use_leader {
         if !agent_args.plugin_dirs.is_empty() {
@@ -1150,23 +1193,9 @@ async fn run_agent_command(
                         tokio::select! {
                             biased; _ = cancel_stdin.cancelled() => break, maybe_line =
                             stdin_lines.recv() => { let Some(line) = maybe_line else {
-                            break }; let line = String::from_utf8_lossy(& line); let
-                            trimmed = line.trim_end_matches(['\r', '\n']).to_string(); if
-                            trimmed.is_empty() { continue; } if trimmed
-                            .contains("\"initialize\"") || trimmed
-                            .contains("\"session/load\"") || trimmed
-                            .contains("\"session/new\"") { cache_outgoing_acp_state(&
-                            trimmed, & replay_state_stdin); } let send_deadline =
-                            tokio::time::Instant::now() +
-                            std::time::Duration::from_secs(300); loop { { let tx =
-                            leader_tx_stdin.lock(). await; if tx.send(trimmed.clone())
-                            .is_ok() { break; } } if cancel_stdin.is_cancelled() ||
-                            tokio::time::Instant::now() >= send_deadline {
-                            tracing::error!("stdio bridge: dropping client message after \
-                                             reconnect retries were exhausted");
-                            break; }
-                            tokio::time::sleep(std::time::Duration::from_millis(250)).
-                            await; } }
+                            break }; forward_stdio_line_to_leader(line, &
+                            leader_tx_stdin, & replay_state_stdin, & cancel_stdin,).
+                            await; }
                         }
                     }
                 });
@@ -2082,8 +2111,8 @@ fn build_update_config() -> UpdateConfig {
     }
     config
 }
-/// Centralized gate for all auto-update checks. Add new suppression
-/// rules here — not at each call site.
+/// Central gate for auto-update checks; add new suppression rules here,
+/// not at call sites.
 fn should_check_for_updates(no_auto_update_flag: bool) -> bool {
     if cfg!(debug_assertions) {
         return false;
@@ -2091,21 +2120,35 @@ fn should_check_for_updates(no_auto_update_flag: bool) -> bool {
     if no_auto_update_flag {
         return false;
     }
-    if std::env::var_os("GROK_DISABLE_AUTOUPDATER").is_some() {
+    !std::env::var_os("GROK_DISABLE_AUTOUPDATER")
+        .is_some_and(|v| env_flag_enabled(&v.to_string_lossy()))
+}
+/// Gate for the stdio agent's background auto-update: only the direct stdio
+/// agent, from the managed install. Other modes update in `run_agent_command`.
+fn stdio_auto_update_enabled(
+    is_stdio: bool,
+    use_leader: bool,
+    updates_enabled: bool,
+    managed_install: bool,
+) -> bool {
+    is_stdio && !use_leader && updates_enabled && managed_install
+}
+/// True when `exe` is the binary `<grok_home>/bin/grok` resolves to, the
+/// install that adopts a staged update on respawn. Both sides are
+/// canonicalized; any failure reports unmanaged and skips the update. The
+/// npm shim hardcodes `~/.grok`, so a custom `GROK_HOME` skips here too.
+fn is_managed_install(exe: Option<std::path::PathBuf>, grok_home: &std::path::Path) -> bool {
+    if grok_home.as_os_str().is_empty() {
         return false;
     }
-    true
-}
-/// Mode-gate for the direct stdio agent's background auto-update.
-///
-/// Only the *direct* stdio agent is newly eligible: every other agent mode
-/// already self-updates at the top of `run_agent_command`, and a leader-backed
-/// stdio process is a thin bridge whose updates are owned by the leader
-/// (`LeaderAutoUpdateConfig`). Update suppression (`--no-auto-update`,
-/// `GROK_DISABLE_AUTOUPDATER`, debug builds) is layered on separately via
-/// [`should_check_for_updates`].
-fn stdio_direct_update_eligible(is_stdio: bool, use_leader: bool) -> bool {
-    is_stdio && !use_leader
+    let Some(exe) = exe else {
+        return false;
+    };
+    let managed = xai_grok_config::grok_application_in(grok_home);
+    match (dunce::canonicalize(&exe), dunce::canonicalize(&managed)) {
+        (Ok(exe), Ok(managed)) => exe == managed,
+        _ => false,
+    }
 }
 /// Map the mutually-exclusive channel flags to a channel name. clap enforces
 /// that at most one is set, so the order is irrelevant.
@@ -2380,27 +2423,55 @@ mod tests {
         xai_grok_shell::heap_profile::dump_to_path(dump.path()).expect("shell dump");
         dump.assert_nonempty_dump();
     }
-    /// Only the direct (non-leader) stdio agent is newly eligible for the
-    /// background auto-update. Leader-backed stdio defers to the leader's own
-    /// updater, and non-stdio modes already update at the top of
-    /// `run_agent_command`.
+    #[cfg(unix)]
     #[test]
-    fn stdio_direct_update_eligible_only_for_non_leader_stdio() {
+    fn is_managed_install_matches_only_the_bin_grok_target() {
+        let home =
+            std::env::temp_dir().join(format!("grok-pager-managed-install-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(home.join("bin")).unwrap();
+        std::fs::create_dir_all(home.join("downloads")).unwrap();
+        assert!(!is_managed_install(
+            Some(home.join("bin").join("grok")),
+            &home
+        ));
+        assert!(!is_managed_install(None, &home));
+        assert!(!is_managed_install(
+            Some(home.join("bin").join("grok")),
+            std::path::Path::new("")
+        ));
+        let target = home.join("downloads").join("grok-1.2.3");
+        std::fs::write(&target, b"binary").unwrap();
+        std::os::unix::fs::symlink(&target, home.join("bin").join("grok")).unwrap();
+        assert!(is_managed_install(
+            Some(home.join("bin").join("grok")),
+            &home
+        ));
+        assert!(is_managed_install(Some(target.clone()), &home));
+        let pinned = home.join("bin").join("grok-9.9.9");
+        std::fs::write(&pinned, b"binary").unwrap();
+        assert!(!is_managed_install(Some(pinned), &home));
+        let _ = std::fs::remove_dir_all(&home);
+    }
+    /// Pins the gate composition; a dropped conjunct fails its named case.
+    #[test]
+    fn stdio_auto_update_requires_direct_stdio_enabled_and_managed() {
+        assert!(stdio_auto_update_enabled(true, false, true, true));
         assert!(
-            stdio_direct_update_eligible(true, false),
-            "direct stdio agent should be eligible",
+            !stdio_auto_update_enabled(true, true, true, true),
+            "leader bridge"
         );
         assert!(
-            !stdio_direct_update_eligible(true, true),
-            "leader-backed stdio defers to the leader's updater",
+            !stdio_auto_update_enabled(false, false, true, true),
+            "non-stdio"
         );
         assert!(
-            !stdio_direct_update_eligible(false, false),
-            "non-stdio modes update at the top of run_agent_command",
+            !stdio_auto_update_enabled(true, false, false, true),
+            "updates off"
         );
         assert!(
-            !stdio_direct_update_eligible(false, true),
-            "non-stdio leader path is not stdio-eligible",
+            !stdio_auto_update_enabled(true, false, true, false),
+            "pinned binary"
         );
     }
     use clap::Parser as _;

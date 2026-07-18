@@ -206,17 +206,32 @@ fn render_diff_hunks_core(
         let layout = gutter_layout(hunk, config);
         let indent_width = if config.indent { INDENT.len() } else { 0 };
         let content_width = (width as usize).saturating_sub(layout.total);
-        // Fresh per-hunk highlighter, same as the hunk-only phase always did.
-        let mut highlighter = syntect.highlight_lines_by_file_path(path);
+        // A diff interleaves two file versions; give each side its own highlighter
+        // so a multi-line construct can't leak across sides. Equal lines render on
+        // the new side and advance both.
+        let mut old_highlighter = syntect.highlight_lines_by_file_path(path);
+        let mut new_highlighter = syntect.highlight_lines_by_file_path(path);
         for line in hunk {
             let trimmed = line.text.trim_end_matches(['\r', '\n']);
-            let raw_text = expand_tabs(trimmed);
+            let text = expand_tabs(trimmed);
             // Cold spans render unconditionally so Delete lines and any map
             // miss (text drift) paint exactly like the hunk-only phase.
-            let mut content_spans =
-                render_content_spans(&raw_text, line.tag, theme, &mut highlighter, syntect);
+            let mut content_spans = match line.tag {
+                ChangeTag::Delete => {
+                    render_content_spans(&text, line.tag, theme, &mut old_highlighter, syntect)
+                }
+                ChangeTag::Insert => {
+                    render_content_spans(&text, line.tag, theme, &mut new_highlighter, syntect)
+                }
+                ChangeTag::Equal => {
+                    let spans =
+                        render_content_spans(&text, line.tag, theme, &mut new_highlighter, syntect);
+                    advance_highlighter(&mut old_highlighter, &text, syntect);
+                    spans
+                }
+            };
             if let Some(map) = by_new_line
-                && let Some(spans) = map_spans_for_line(line, &raw_text, map, theme)
+                && let Some(spans) = map_spans_for_line(line, &text, map, theme)
             {
                 content_spans = spans;
             }
@@ -647,6 +662,16 @@ fn painted(text: &str, style: Style) -> Span<'static> {
     Span::styled(text.to_string(), style)
 }
 
+fn advance_highlighter(
+    highlighter: &mut Option<HighlightLines<'_>>,
+    content: &str,
+    syntect: &Syntect,
+) {
+    if let Some(hl) = highlighter.as_mut() {
+        let _ = hl.highlight_line(&format!("{content}\n"), &syntect.syntax_set);
+    }
+}
+
 /// Render content spans with syntax highlighting.
 fn render_content_spans(
     content: &str,
@@ -938,9 +963,8 @@ impl EditToolCallBlock {
         Line::from(spans)
     }
 
-    /// Absolute `file://` for OSC8 regardless of painted path surface.
-    fn path_link_url(&self, cwd: Option<&Path>) -> Option<Arc<str>> {
-        crate::render::osc8::tool_path_file_url(&self.path, cwd)
+    fn path_link_target(&self, cwd: Option<&Path>) -> Option<crate::render::osc8::LinkTarget> {
+        crate::render::osc8::tool_path_file_target(&self.path, cwd)
     }
 
     /// Render this block's hunks for its current highlight phase — the single
@@ -1152,7 +1176,7 @@ impl EditToolCallBlock {
             edit_cfg.effective_line_summary(crate::appearance::cache::load_collapsed_edit_blocks());
 
         let cwd = ctx.cwd.as_deref();
-        let link_url = self.path_link_url(cwd);
+        let link_target = self.path_link_target(cwd);
 
         match ctx.mode {
             DisplayMode::Collapsed => {
@@ -1179,7 +1203,7 @@ impl EditToolCallBlock {
                         selection_range: Some(TOOL_HEADER_RANGE),
                         // Copy the painted path span (basename when collapsed).
                         content: line,
-                        link_url,
+                        link_target,
                         ..Default::default()
                     }],
                 })
@@ -1232,7 +1256,7 @@ impl EditToolCallBlock {
                         selection_text: line.selection_text,
                         joiner: line.joiner,
                         content: line.content,
-                        link_url: if has_path { link_url.clone() } else { None },
+                        link_target: if has_path { link_target.clone() } else { None },
                         ..Default::default()
                     });
                 }
@@ -1656,13 +1680,23 @@ mod tests {
     }
 
     #[test]
-    fn header_link_url_is_absolute_file_url_for_all_surfaces() {
+    fn header_link_target_is_absolute_file_for_all_surfaces() {
         let abs = "/Users/me/project/src/foo.rs";
         let cwd = Path::new("/Users/me/project");
         let block = EditToolCallBlock::new(abs, vec![]);
-        let url = block.path_link_url(Some(cwd)).expect("file url");
-        assert!(url.starts_with("file://"), "got {url}");
-        assert!(url.contains("foo.rs"), "got {url}");
+        let target = block.path_link_target(Some(cwd)).expect("file target");
+        assert_eq!(
+            target,
+            crate::render::osc8::LinkTarget::File(Arc::from(Path::new(abs)))
+        );
+        assert_eq!(
+            crate::render::osc8::resolve_link_target(&target)
+                .unwrap()
+                .osc8_url
+                .unwrap()
+                .as_ref(),
+            "file:///Users/me/project/src/foo.rs"
+        );
 
         let mut ctx = test_ctx();
         ctx.cwd = Some(cwd.to_path_buf());
@@ -1672,7 +1706,7 @@ mod tests {
             collapsed.lines[0].content.spans[1].content.as_ref(),
             "foo.rs"
         );
-        assert_eq!(collapsed.lines[0].link_url.as_deref(), Some(url.as_ref()));
+        assert_eq!(collapsed.lines[0].link_target.as_ref(), Some(&target));
 
         ctx.mode = DisplayMode::Expanded;
         let expanded = block.output(&ctx);
@@ -1680,7 +1714,7 @@ mod tests {
             expanded.lines[0].content.spans[1].content.as_ref(),
             "src/foo.rs"
         );
-        assert_eq!(expanded.lines[0].link_url.as_deref(), Some(url.as_ref()));
+        assert_eq!(expanded.lines[0].link_target.as_ref(), Some(&target));
     }
 
     #[test]
@@ -2523,6 +2557,57 @@ class ProcessQueueItem(BaseModel):
         assert_ne!(
             let_rgb, str_rgb,
             "keyword and string must not share syntect FG; styles={styles:?}"
+        );
+    }
+
+    /// Regression: a `"""` opened on a removed line must not change how the
+    /// added line highlights. The two diff sides are highlighted independently.
+    #[test]
+    fn delete_side_multiline_string_does_not_leak_into_insert() {
+        let _guard = pin_groknight_syntect();
+        let path = Path::new("probe.py");
+        let config = DiffRenderConfig::default();
+        let theme = Theme::groknight();
+
+        // Content spans of the added `def` line, given the removed line above it.
+        let added_def = |removed: &str| -> Vec<(ratatui::style::Color, String)> {
+            let hunk = vec![
+                DiffLine {
+                    text: format!("{removed}\n"),
+                    lo: 1,
+                    ln: 0,
+                    tag: ChangeTag::Delete,
+                },
+                DiffLine {
+                    text: "def parse(x: str) -> int:\n".into(),
+                    lo: 0,
+                    ln: 1,
+                    tag: ChangeTag::Insert,
+                },
+            ];
+            let rows = render_diff_hunk_highlighted(&hunk, path, &theme, 120, &config);
+            let insert = rows.last().expect("insert row");
+            insert.line.spans[insert.gutter_span_count..]
+                .iter()
+                .map(|span| {
+                    (
+                        span.style.fg.unwrap_or(ratatui::style::Color::Reset),
+                        span.content.to_string(),
+                    )
+                })
+                .collect()
+        };
+
+        let after_open_docstring = added_def("    \"\"\"Old docstring opener");
+        let after_plain_code = added_def("    x = 1");
+        assert_eq!(
+            after_open_docstring, after_plain_code,
+            "added line must be highlighted independently of the removed side",
+        );
+        // Under the bug the added line is one string span; the fix keeps it code.
+        assert!(
+            after_open_docstring.len() > 1,
+            "added def line should be syntax highlighted"
         );
     }
 

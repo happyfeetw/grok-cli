@@ -30,28 +30,27 @@ impl MvpAgent {
             });
         }
     }
-    /// Remove a session and its thread handle **without** finalizing the cloud
-    /// replica.
-    ///
-    /// Used for dead-actor reaping and idle-unload: the conversation stays
-    /// resumable on disk, so it must NOT be marked "done" upstream. Genuine
-    /// terminal closes go through [`MvpAgent::close_session_explicit`]. Also
-    /// drops the `session_live_state` entry so that map stays bounded.
+    /// Remove a session without finalizing; it stays resumable on disk.
     pub(crate) fn remove_session(&self, id: &acp::SessionId) {
         self.sessions.borrow_mut().remove(id);
-        self.prompt_intake_locks.borrow_mut().remove(id);
+        self.dispatch_locks.borrow_mut().remove(id);
         self.session_threads.borrow_mut().remove(id);
         self.session_index_claims.borrow_mut().remove(id);
         self.require_gateway_sessions.borrow_mut().remove(id);
+        self.model_unavailable_sessions
+            .borrow_mut()
+            .remove(id.0.as_ref());
+        self.permission_event_receivers.borrow_mut().remove(id);
+        self.session_turn_numbers.borrow_mut().remove(id);
         self.session_live_state.borrow_mut().remove(id);
+        if let Some(ops) = self.workspace_ops.borrow().as_ref() {
+            ops.end_local_session(id.0.as_ref());
+        }
     }
-    /// Get-or-create the per-session prompt-intake lock (see
-    /// [`Self::prompt_intake_locks`]). Cheap clone of the shared `Rc`.
-    pub(super) fn prompt_intake_lock(
-        &self,
-        id: &acp::SessionId,
-    ) -> std::rc::Rc<tokio::sync::Mutex<()>> {
-        self.prompt_intake_locks
+    /// Get-or-create the per-session dispatch lock (see
+    /// [`Self::dispatch_locks`]). Cheap clone of the shared `Rc`.
+    pub(super) fn dispatch_lock(&self, id: &acp::SessionId) -> std::rc::Rc<tokio::sync::Mutex<()>> {
+        self.dispatch_locks
             .borrow_mut()
             .entry(id.clone())
             .or_default()
@@ -403,4 +402,47 @@ impl MvpAgent {
             .await
             .unwrap_or(true)
     }
+    /// Entry counts for every collection [`Self::remove_session`] drains,
+    /// plus the workspace binding and subagent maps.
+    pub(crate) fn registry_snapshot(&self) -> RegistrySnapshot {
+        let (subagent_pending, subagent_active, subagent_completed) =
+            self.subagent_coordinator.borrow().registry_snapshot();
+        RegistrySnapshot {
+            sessions: self.sessions.borrow().len(),
+            session_threads: self.session_threads.borrow().len(),
+            dispatch_locks: self.dispatch_locks.borrow().len(),
+            session_turn_numbers: self.session_turn_numbers.borrow().len(),
+            permission_event_receivers: self.permission_event_receivers.borrow().len(),
+            model_unavailable_sessions: self.model_unavailable_sessions.borrow().len(),
+            session_live_state: self.session_live_state.borrow().len(),
+            session_index_claims: self.session_index_claims.borrow().len(),
+            require_gateway_sessions: self.require_gateway_sessions.borrow().len(),
+            subagent_pending,
+            subagent_active,
+            subagent_completed,
+            workspace_bindings: self
+                .workspace_ops
+                .borrow()
+                .as_ref()
+                .and_then(|ops| ops.workspace_handle().map(|h| h.session_count())),
+        }
+    }
+}
+/// Field names are the wire contract of `x.ai/debug/agent`'s `registries`
+/// object; each maps to the same-named registry.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct RegistrySnapshot {
+    pub sessions: usize,
+    pub session_threads: usize,
+    pub dispatch_locks: usize,
+    pub session_turn_numbers: usize,
+    pub permission_event_receivers: usize,
+    pub model_unavailable_sessions: usize,
+    pub session_live_state: usize,
+    pub session_index_claims: usize,
+    pub require_gateway_sessions: usize,
+    pub subagent_pending: usize,
+    pub subagent_active: usize,
+    pub subagent_completed: usize,
+    pub workspace_bindings: Option<usize>,
 }

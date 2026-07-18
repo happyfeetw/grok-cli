@@ -9,7 +9,7 @@
     <img alt="SpaceXAI logo" src="https://media.x.ai/v1/website/spacexai-symbol-black-transparent-6435cf42.png" width="96">
   </picture>
   <br>
-  Grok Build (<code>grok</code>)
+  Grok Build fork (<code>grok-cli</code>)
 </h1>
 
 <p align="center">

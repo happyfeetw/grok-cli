@@ -1,6 +1,7 @@
 //! Async task-result application: routes task results into state.
 use super::auth::{
     ensure_login_method, handle_auth_complete, handle_auth_url_ready, handle_mcp_auth_trigger_done,
+    handle_mcp_setup_submit_done,
 };
 use super::billing::{
     PAYWALL_AUTO_CHECK_TIMEOUT, apply_auto_topup, handle_billing_fetched,
@@ -334,10 +335,12 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
         }
         TaskResult::RosterLoaded { sessions } => {
             app.leader_roster = sessions;
+            app.dashboard_sessions_loading = false;
             vec![]
         }
         TaskResult::RosterFailed { error } => {
             tracing::debug!(error = % error, "leader roster fetch failed");
+            app.dashboard_sessions_loading = false;
             vec![]
         }
         TaskResult::DashboardSessionsLoaded { sessions } => {
@@ -558,7 +561,7 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
                 && *current_seq == request_seq
             {
                 app.auth_state = AuthState::Pending { error: Some(error) };
-                app.auth_code_input.clear();
+                app.auth_code_input.reset();
             }
             vec![]
         }
@@ -569,6 +572,7 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             mode,
         } => handle_auth_url_ready(app, request_seq, auth_url, external, mode),
         TaskResult::AuthCodeSubmitted { .. } => vec![],
+        TaskResult::AuthCancelComplete => vec![],
         TaskResult::McpsListLoaded { agent_id, result } => {
             use crate::views::extensions_modal::TabDataState;
             if let Some(agent) = app.agents.get_mut(&agent_id)
@@ -588,6 +592,11 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             server_name,
             result,
         } => handle_mcp_auth_trigger_done(app, agent_id, server_name, result),
+        TaskResult::McpSetupSubmitDone {
+            agent_id,
+            server_name,
+            result,
+        } => handle_mcp_setup_submit_done(app, agent_id, server_name, result),
         TaskResult::HooksListLoaded { agent_id, result } => {
             handle_hooks_list_loaded(app, agent_id, result)
         }
@@ -861,7 +870,11 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             }
             vec![]
         }
-        TaskResult::BtwResponse { agent_id, result } => handle_btw_response(app, agent_id, result),
+        TaskResult::BtwResponse {
+            agent_id,
+            result,
+            minimal_request_id,
+        } => handle_btw_response(app, agent_id, result, minimal_request_id),
         TaskResult::InterjectQueued { .. } => vec![],
         TaskResult::RecapRequested {
             session_id,
@@ -919,8 +932,10 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             }
             vec![]
         }
-        TaskResult::AuthCopiedTimeout => {
-            app.auth_clipboard_copied = false;
+        TaskResult::AuthCopyFeedbackTimeout { generation } => {
+            if generation == app.auth_clipboard_feedback_generation {
+                app.auth_clipboard_delivery = None;
+            }
             vec![]
         }
         TaskResult::PaywallCheckTick => {
@@ -952,7 +967,7 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             app.last_subscription_check_at = None;
             app.login_method_id = None;
             ensure_login_method(app);
-            app.auth_clipboard_copied = false;
+            app.auth_clipboard_delivery = None;
             let effects = dispatch_exit_session(app);
             app.welcome_prompt_focused = false;
             effects

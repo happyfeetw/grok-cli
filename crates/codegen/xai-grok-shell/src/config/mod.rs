@@ -444,9 +444,23 @@ impl SubagentsConfig {
     /// intent (CLI flag, `GROK_SUBAGENTS`, `[subagents] enabled`) changes
     /// the default.
     ///
-    /// When `cwd` is provided, file-based roles are discovered from
-    /// `{cwd}/.grok/roles/*.toml` and merged (inline config takes precedence).
-    pub fn resolve(cli_flag: bool, config: &toml::Value, cwd: Option<&std::path::Path>) -> Self {
+    /// Project files are excluded from this trust-independent base; Task
+    /// boundaries overlay them using the parent cwd's authoritative trust verdict.
+    pub fn resolve(cli_flag: bool, config: &toml::Value) -> Self {
+        let user_grok_root = xai_grok_config::user_grok_home();
+        Self::resolve_base_with_sources(
+            cli_flag,
+            config,
+            user_grok_root.as_deref(),
+            &bundle::bundled_root(),
+        )
+    }
+    pub(crate) fn resolve_base_with_sources(
+        cli_flag: bool,
+        config: &toml::Value,
+        user_grok_root: Option<&std::path::Path>,
+        bundled_root: &std::path::Path,
+    ) -> Self {
         let mut result: Self = config
             .get("subagents")
             .and_then(|v| v.clone().try_into().ok())
@@ -460,18 +474,39 @@ impl SubagentsConfig {
             true,
         );
         result.enabled = resolved.value;
-        if let Some(cwd) = cwd {
-            result.discover_roles(cwd);
-            result.discover_personas(cwd);
+        if let Some(root) = user_grok_root {
+            result.discover_roles_in_dir(&root.join("roles"));
+            result.discover_personas_in_dir(&root.join("personas"));
         }
-        if let Some(home) = dirs::home_dir() {
-            result.discover_roles(&home);
-            result.discover_personas(&home);
-        }
-        let bundled_root = bundle::bundled_root();
         result.discover_roles_in_dir(&bundled_root.join("roles"));
         result.discover_personas_in_dir(&bundled_root.join("personas"));
         result
+    }
+    pub(crate) fn effective_definition_maps(
+        roles: &std::collections::HashMap<String, SubagentRole>,
+        personas: &std::collections::HashMap<String, SubagentPersona>,
+        cwd: &std::path::Path,
+        project_trusted: bool,
+    ) -> (
+        std::collections::HashMap<String, SubagentRole>,
+        std::collections::HashMap<String, SubagentPersona>,
+    ) {
+        let mut project = Self::default();
+        if project_trusted {
+            project.discover_roles(cwd);
+            project.discover_personas(cwd);
+        }
+        for (name, role) in roles {
+            if role.source_dir.is_none() || !project.roles.contains_key(name) {
+                project.roles.insert(name.clone(), role.clone());
+            }
+        }
+        for (name, persona) in personas {
+            if persona.source_path.is_none() || !project.personas.contains_key(name) {
+                project.personas.insert(name.clone(), persona.clone());
+            }
+        }
+        (project.roles, project.personas)
     }
 }
 /// Managed MCP connector fetching config (`[managed_mcps]` in config.toml).
@@ -817,12 +852,12 @@ impl StorageMode {
 pub use xai_grok_config::ConfigLayers;
 pub use xai_grok_config::{
     MDM_REQUIREMENTS_SOURCE, RequirementsLayer, RequirementsSource, ServingIdentity, SyncMarker,
-    claude_managed_settings_probe_path, fail_closed_flag_from_str,
+    claude_managed_settings_probe_path, confirmed_team_switch, confirmed_team_switch_at,
     is_managed_config_hard_stale_for, is_managed_config_stale_for, load_config_file,
     load_from_disk, load_managed_config, load_merged_requirements, load_system_managed_config,
-    load_toml_file, managed_config_identity_changed, managed_deployment_id,
-    managed_policy_compromised_for, mark_managed_config_synced, requirements_layers,
-    system_config_dir, user_grok_home,
+    load_toml_file, managed_config_identity_changed_at, managed_deployment_id,
+    managed_policy_compromised_for, mark_managed_config_synced, mark_managed_config_synced_at,
+    normalize_identity, requirements_layers, system_config_dir, user_grok_home,
 };
 /// Map of "dotted.path" to which config file the value came from.
 pub fn config_origins(

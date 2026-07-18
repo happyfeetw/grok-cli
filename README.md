@@ -9,7 +9,7 @@
     <img alt="SpaceXAI logo" src="https://media.x.ai/v1/website/spacexai-symbol-black-transparent-6435cf42.png" width="96">
   </picture>
   <br>
-  Grok Build (<code>grok</code>)
+  Grok Build fork (<code>grok-cli</code>)
 </h1>
 
 <p align="center">
@@ -54,6 +54,9 @@ Protocol (ACP).
 This repository is a **community fork** of the open-source Grok Build tree
 (upstream: [xai-org/grok-build](https://github.com/xai-org/grok-build)), with
 extra packaging and system-proxy fixes. Contributions are welcome.
+
+A small `SOURCE_REV` file at the root records the full monorepo commit SHA
+for the version of the code present in this tree.
 
 </div>
 
@@ -140,9 +143,18 @@ Requirements:
 
 - **Rust** — the toolchain is pinned by [`rust-toolchain.toml`](rust-toolchain.toml);
   `rustup` installs it automatically on first build.
-- **protoc** — proto codegen resolves [`bin/protoc`](bin/protoc) (a
-  [dotslash](https://dotslash-cli.com) launcher) or falls back to a `protoc` on
-  `PATH` / `$PROTOC`.
+- **[DotSlash](https://dotslash-cli.com)** — required so hermetic tools under
+  [`bin/`](bin/) (notably [`bin/protoc`](bin/protoc)) can download and run.
+  Install it and ensure `dotslash` is on your `PATH` **before** building:
+
+  ```sh
+  cargo install dotslash
+  # or: prebuilt packages — https://dotslash-cli.com/docs/installation/
+  /usr/bin/env dotslash --help   # sanity check
+  ```
+
+- **protoc** — proto codegen resolves [`bin/protoc`](bin/protoc) via DotSlash,
+  or falls back to a `protoc` on `PATH` / `$PROTOC`.
 - macOS and Linux are supported build hosts; Windows builds are best-effort
   and not currently tested from this tree.
 

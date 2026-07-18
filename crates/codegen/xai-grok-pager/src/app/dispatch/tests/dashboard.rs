@@ -1,6 +1,7 @@
 //! Tests for dashboard dispatchers: attach, overlays, rows, and permissions.
 
 use super::*;
+use crate::app::dispatch::queue::maybe_drain_queue;
 
 #[test]
 fn voice_final_appends_to_dashboard_dispatch() {
@@ -43,8 +44,6 @@ fn voice_final_appends_to_peek_reply_when_peek_open() {
             time_ago: "1m".into(),
             response_type: "Response".into(),
             last_user_message: None,
-            last_agent_lines: vec![],
-            last_response_truncated: false,
             question: None,
             options: vec![],
             request_id: None,
@@ -92,8 +91,6 @@ fn voice_final_discarded_when_peek_row_changed_after_stop() {
                 time_ago: "1m".into(),
                 response_type: "Response".into(),
                 last_user_message: None,
-                last_agent_lines: vec![],
-                last_response_truncated: false,
                 question: None,
                 options: vec![],
                 request_id: None,
@@ -258,8 +255,6 @@ fn voice_target_bound_at_start_dispatch_vs_peek() {
             time_ago: "1m".into(),
             response_type: "Response".into(),
             last_user_message: None,
-            last_agent_lines: vec![],
-            last_response_truncated: false,
             question: None,
             options: vec![],
             request_id: None,
@@ -289,8 +284,6 @@ fn voice_auto_stops_when_peek_row_changes() {
                 time_ago: "1m".into(),
                 response_type: "Response".into(),
                 last_user_message: None,
-                last_agent_lines: vec![],
-                last_response_truncated: false,
                 question: None,
                 options: vec![],
                 request_id: None,
@@ -1097,7 +1090,7 @@ fn dashboard_image_dispatch_cancel_rewind_resends_attachment() {
         agent.session.session_id = Some(acp::SessionId::new("dashboard-image"));
         agent.session.state = AgentState::Idle;
         assert!(matches!(
-            maybe_drain_queue(agent).as_slice(),
+            maybe_drain_queue(agent).effects.as_slice(),
             [Effect::SendPromptBlocks { .. }]
         ));
     }
@@ -1554,21 +1547,59 @@ fn dashboard_open_without_leader_fetches_local_sessions() {
     );
 }
 
-/// In leader mode the live FleetView roster is the source (polled by the
-/// event loop), so opening must NOT also fetch the local list.
+/// In leader mode the live FleetView roster is the source, so opening must
+/// fetch that roster immediately (not wait for the poll tick) and must NOT
+/// also fetch the local on-disk list.
 #[serial_test::serial(GROK_AGENT_DASHBOARD)]
 #[test]
-fn dashboard_open_with_leader_skips_local_session_fetch() {
+fn dashboard_open_with_leader_fetches_roster_not_local_sessions() {
     let mut app = test_app_with_agent();
     app.leader_mode = true;
     app.active_view = ActiveView::Agent(AgentId(0));
     let effects = dispatch_open_dashboard(&mut app);
     assert!(
+        effects.iter().any(|e| matches!(e, Effect::FetchRoster)),
+        "leader dashboard open must fetch the live roster immediately",
+    );
+    assert!(
         !effects
             .iter()
             .any(|e| matches!(e, Effect::FetchDashboardSessions)),
-        "leader dashboard open polls the live roster, not the local list",
+        "leader dashboard open must not fetch the local on-disk list",
     );
+    assert!(
+        app.dashboard_sessions_loading,
+        "leader open must show Loading sessions until RosterLoaded",
+    );
+}
+
+#[test]
+fn roster_loaded_clears_dashboard_sessions_loading() {
+    let mut app = test_app();
+    app.leader_mode = true;
+    app.dashboard_sessions_loading = true;
+    let _ = dispatch(
+        Action::TaskComplete(TaskResult::RosterLoaded {
+            sessions: vec![idle_roster_entry("sess-live", "Working agent")],
+        }),
+        &mut app,
+    );
+    assert!(!app.dashboard_sessions_loading);
+    assert_eq!(app.leader_roster.len(), 1);
+}
+
+#[test]
+fn roster_failed_clears_dashboard_sessions_loading() {
+    let mut app = test_app();
+    app.leader_mode = true;
+    app.dashboard_sessions_loading = true;
+    let _ = dispatch(
+        Action::TaskComplete(TaskResult::RosterFailed {
+            error: "timeout".into(),
+        }),
+        &mut app,
+    );
+    assert!(!app.dashboard_sessions_loading);
 }
 
 /// `DashboardSessionsLoaded` stores the local idle sessions, and
@@ -2927,6 +2958,148 @@ fn dashboard_ctrl_backslash_exits_dashboard() {
     );
 }
 
+fn insert_second_agent(app: &mut AppView) -> AgentId {
+    let id = AgentId(1);
+    let session = make_test_agent_session(app, id, "second");
+    let mut agent = AgentView::new(session, ScrollbackState::new());
+    agent.generated_session_title = Some("Second".into());
+    app.agents.insert(id, agent);
+    mark_agent_nonempty(app, id);
+    id
+}
+
+/// Multi-agent: Ctrl+\ out of the dashboard restores the agent we left,
+/// not insertion-order first (empty older sessions under leader mode).
+#[serial_test::serial(GROK_AGENT_DASHBOARD)]
+#[test]
+fn dashboard_ctrl_backslash_returns_to_same_agent() {
+    let mut app = test_app_with_agent();
+    mark_agent_nonempty(&mut app, AgentId(0));
+    let id2 = insert_second_agent(&mut app);
+
+    app.active_view = ActiveView::Agent(id2);
+    let _ = dispatch_open_dashboard(&mut app);
+    let _ = dispatch_open_dashboard(&mut app);
+
+    assert_eq!(app.active_view, ActiveView::Agent(id2));
+    assert!(app.dashboard_return.is_none());
+    assert_eq!(app.dashboard.as_ref().and_then(|d| d.attached_agent), None);
+}
+
+/// Open from Welcome replaces any leftover return target (e.g. after /home).
+#[serial_test::serial(GROK_AGENT_DASHBOARD)]
+#[test]
+fn dashboard_open_from_welcome_clears_stale_return_agent() {
+    use crate::app::app_view::DashboardReturn;
+    let mut app = test_app_with_agent();
+    mark_agent_nonempty(&mut app, AgentId(0));
+    let id2 = insert_second_agent(&mut app);
+
+    app.dashboard_return = Some(DashboardReturn::Agent(id2));
+    app.active_view = ActiveView::Welcome;
+    let _ = dispatch_open_dashboard(&mut app);
+    let _ = dispatch_exit_dashboard(&mut app);
+
+    assert_eq!(app.active_view, ActiveView::Agent(AgentId(0)));
+}
+
+/// Attach → overlay exit → dashboard exit restores agent + overlay chrome.
+#[serial_test::serial(GROK_AGENT_DASHBOARD)]
+#[test]
+fn dashboard_overlay_exit_then_exit_returns_to_attached_agent() {
+    let mut app = test_app_with_agent();
+    mark_agent_nonempty(&mut app, AgentId(0));
+    let id2 = insert_second_agent(&mut app);
+
+    open_dashboard(&mut app);
+    let _ = dispatch_dashboard_attach(
+        &mut app,
+        crate::views::dashboard::DashboardRowId::TopLevel(id2),
+    );
+    let _ = dispatch_dashboard_overlay_exit(&mut app);
+    let _ = dispatch_exit_dashboard(&mut app);
+
+    assert_eq!(app.active_view, ActiveView::Agent(id2));
+    assert_eq!(
+        app.dashboard.as_ref().and_then(|d| d.attached_agent),
+        Some(id2)
+    );
+}
+
+/// Subagent attach round-trip keeps child takeover and Subagent row cursor.
+#[serial_test::serial(GROK_AGENT_DASHBOARD)]
+#[test]
+fn dashboard_overlay_exit_then_exit_restores_subagent_row() {
+    let mut app = test_app_with_agent();
+    open_dashboard(&mut app);
+    let parent = AgentId(0);
+    mark_agent_nonempty(&mut app, parent);
+    let child_sid = "child-return".to_string();
+    app.agents
+        .get_mut(&parent)
+        .unwrap()
+        .subagent_sessions
+        .insert(child_sid.clone(), make_test_subagent(&child_sid, "sa-ret"));
+    let child_view = AgentView::new(
+        make_test_agent_session(&app, AgentId(1), "child-session"),
+        ScrollbackState::new(),
+    );
+    app.agents
+        .get_mut(&parent)
+        .unwrap()
+        .subagent_views
+        .insert(child_sid.clone(), Box::new(child_view));
+
+    let _ = dispatch_dashboard_attach(
+        &mut app,
+        crate::views::dashboard::DashboardRowId::Subagent {
+            parent,
+            child_session_id: child_sid.clone(),
+        },
+    );
+    let _ = dispatch_dashboard_overlay_exit(&mut app);
+    let _ = dispatch_exit_dashboard(&mut app);
+
+    assert_eq!(app.active_view, ActiveView::Agent(parent));
+    assert_eq!(
+        app.dashboard.as_ref().and_then(|d| d.attached_agent),
+        Some(parent)
+    );
+    assert_eq!(
+        app.agents[&parent].active_subagent.as_deref(),
+        Some(child_sid.as_str())
+    );
+    assert_eq!(
+        app.dashboard.as_ref().and_then(|d| d.selected.clone()),
+        Some(crate::views::dashboard::DashboardRowId::Subagent {
+            parent,
+            child_session_id: child_sid,
+        })
+    );
+}
+
+/// Dead overlay return target: fall back without painting overlay chrome.
+#[serial_test::serial(GROK_AGENT_DASHBOARD)]
+#[test]
+fn dashboard_exit_does_not_overlay_fallback_when_return_agent_dead() {
+    let mut app = test_app_with_agent();
+    mark_agent_nonempty(&mut app, AgentId(0));
+    let id2 = insert_second_agent(&mut app);
+
+    open_dashboard(&mut app);
+    let _ = dispatch_dashboard_attach(
+        &mut app,
+        crate::views::dashboard::DashboardRowId::TopLevel(id2),
+    );
+    let _ = dispatch_dashboard_overlay_exit(&mut app);
+    app.agents.shift_remove(&id2);
+
+    let _ = dispatch_exit_dashboard(&mut app);
+
+    assert_eq!(app.active_view, ActiveView::Agent(AgentId(0)));
+    assert_eq!(app.dashboard.as_ref().and_then(|d| d.attached_agent), None);
+}
+
 /// `DashboardOverlayExit` returns the user to
 /// the dashboard from an attached agent view and clears the
 /// overlay state.
@@ -3779,16 +3952,24 @@ fn dashboard_rename_end_to_end_top_level_row() {
             .rename
             .as_ref()
             .expect("begin_rename must arm the rename overlay")
-            .draft,
+            .text(),
         "",
         "rename draft must start empty (no prefilled title)",
     );
-    // Simulate typing a new title via `Action::DashboardRenameInput`.
-    let effects = dispatch(
-        Action::DashboardRenameInput("My renamed session".to_string()),
-        &mut app,
-    );
-    assert!(effects.is_empty(), "rename input takes no effects");
+    let registry = crate::actions::ActionRegistry::defaults();
+    for character in "My renamed session".chars() {
+        let outcome = app.dashboard.as_mut().unwrap().handle_input(
+            &crossterm::event::Event::Key(crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Char(character),
+                crossterm::event::KeyModifiers::NONE,
+            )),
+            &registry,
+        );
+        assert!(matches!(
+            outcome,
+            crate::app::app_view::InputOutcome::Changed
+        ));
+    }
     assert_eq!(
         app.dashboard
             .as_ref()
@@ -3796,7 +3977,7 @@ fn dashboard_rename_end_to_end_top_level_row() {
             .rename
             .as_ref()
             .unwrap()
-            .draft,
+            .text(),
         "My renamed session",
     );
     // Commit — emits a RenameSession effect and stamps the agent
@@ -3837,7 +4018,11 @@ fn dashboard_rename_cancel_action_emits_no_effect() {
         d.selected = Some(crate::views::dashboard::DashboardRowId::TopLevel(id));
     }
     dispatch_dashboard_begin_rename(&mut app);
-    let _ = dispatch(Action::DashboardRenameInput("scratch".into()), &mut app);
+    app.dashboard
+        .as_mut()
+        .and_then(|dashboard| dashboard.rename.as_mut())
+        .expect("rename draft")
+        .set_text("scratch");
     let effects = dispatch(Action::DashboardCancelRename, &mut app);
     assert!(effects.is_empty(), "cancel must not emit effects");
     assert!(
@@ -3869,10 +4054,7 @@ fn dashboard_rename_esc_keystroke_routes_to_cancel() {
     let mut state = DashboardState::new();
     let id = crate::views::dashboard::DashboardRowId::TopLevel(AgentId(0));
     state.selected = Some(id.clone());
-    state.rename = Some(RenameDraft {
-        row: id.clone(),
-        draft: "draft".into(),
-    });
+    state.rename = Some(RenameDraft::new(id.clone(), "draft"));
     // Synthesise an Esc keystroke and feed it to `handle_input`.
     let esc = Event::Key(KeyEvent {
         code: KeyCode::Esc,
@@ -3908,7 +4090,7 @@ fn dashboard_upgrade_cta_paints_arms_rect_and_ctrl_o_override() {
     use xai_grok_telemetry::events::AnnouncementCtaSurface;
 
     let registry = ActionRegistry::defaults();
-    let agents: indexmap::IndexMap<AgentId, crate::app::agent_view::AgentView> =
+    let mut agents: indexmap::IndexMap<AgentId, crate::app::agent_view::AgentView> =
         indexmap::IndexMap::new();
     // Wide enough that the reservation leaves room for the button + caption.
     let area = Rect::new(0, 0, 140, 20);
@@ -3931,7 +4113,7 @@ fn dashboard_upgrade_cta_paints_arms_rect_and_ctrl_o_override() {
         &mut buf,
         area,
         &mut state,
-        &agents,
+        &mut agents,
         &registry,
         None,
         &[],
@@ -3985,7 +4167,7 @@ fn dashboard_upgrade_cta_paints_arms_rect_and_ctrl_o_override() {
         &mut buf,
         area,
         &mut state,
-        &agents,
+        &mut agents,
         &registry,
         None,
         &[],
@@ -4016,7 +4198,7 @@ fn dashboard_upgrade_cta_paints_arms_rect_and_ctrl_o_override() {
         &mut buf,
         area,
         &mut state,
-        &agents,
+        &mut agents,
         &registry,
         None,
         &[],
@@ -4053,7 +4235,7 @@ fn dashboard_upgrade_cta_paints_arms_rect_and_ctrl_o_override() {
         &mut buf,
         area,
         &mut state,
-        &agents,
+        &mut agents,
         &registry,
         None,
         &[],
@@ -4075,10 +4257,10 @@ fn dashboard_commit_rename_empty_does_not_emit_effect() {
         d.selected = Some(crate::views::dashboard::DashboardRowId::TopLevel(AgentId(
             0,
         )));
-        d.rename = Some(crate::views::dashboard::state::RenameDraft {
-            row: crate::views::dashboard::DashboardRowId::TopLevel(AgentId(0)),
-            draft: "   ".to_string(),
-        });
+        d.rename = Some(crate::views::dashboard::state::RenameDraft::new(
+            crate::views::dashboard::DashboardRowId::TopLevel(AgentId(0)),
+            "   ",
+        ));
     }
     let effects = dispatch_dashboard_commit_rename(&mut app);
     assert!(
@@ -4336,8 +4518,7 @@ fn dashboard_open_shortcuts_help_builds_modal_idempotently() {
         .as_mut()
         .unwrap()
         .state
-        .query
-        .push_str("nav");
+        .set_query("nav");
     let _ = dispatch(Action::DashboardOpenShortcutsHelp, &mut app);
     assert_eq!(
         app.dashboard
@@ -4347,7 +4528,7 @@ fn dashboard_open_shortcuts_help_builds_modal_idempotently() {
             .as_ref()
             .unwrap()
             .state
-            .query,
+            .query(),
         "nav",
         "re-dispatch must NOT rebuild the modal — user's query would vanish",
     );
@@ -4808,8 +4989,6 @@ fn dashboard_permission_select_drops_stale_request() {
                 time_ago: String::new(),
                 response_type: "Awaiting your input".into(),
                 last_user_message: None,
-                last_agent_lines: Vec::new(),
-                last_response_truncated: false,
                 question: Some("q?".into()),
                 options: vec![("allow".into(), "Allow".into())],
                 request_id: Some(123), // mismatched id
@@ -4845,8 +5024,6 @@ fn dashboard_permission_select_for_missing_row_clears_peek() {
                 time_ago: String::new(),
                 response_type: "Idle".into(),
                 last_user_message: None,
-                last_agent_lines: Vec::new(),
-                last_response_truncated: false,
                 question: None,
                 options: Vec::new(),
                 request_id: None,
@@ -4885,8 +5062,6 @@ fn dashboard_peek_reply_to_idle_agent_sends() {
                 time_ago: String::new(),
                 response_type: "Idle".into(),
                 last_user_message: None,
-                last_agent_lines: Vec::new(),
-                last_response_truncated: false,
                 question: None,
                 options: Vec::new(),
                 request_id: None,
@@ -4915,7 +5090,18 @@ fn dashboard_peek_reply_to_idle_agent_sends() {
 #[test]
 fn dashboard_peek_reply_to_running_agent_queues() {
     let mut app = test_app_with_agent();
-    app.agents.get_mut(&AgentId(0)).unwrap().session.state = AgentState::TurnRunning;
+    {
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        agent.session.state = AgentState::TurnRunning;
+        agent
+            .scrollback
+            .push_block(RenderBlock::user_prompt("current turn"));
+        agent.scrollback.prepare_layout(80, 24);
+        let current = agent.scrollback.len().saturating_sub(1);
+        agent.scrollback.set_selected(Some(current));
+        agent.scrollback.scroll_to_entry_top(current);
+        agent.scrollback.enable_follow_with_preserve();
+    }
     open_dashboard(&mut app);
     if let Some(d) = app.dashboard.as_mut() {
         d.selected = Some(crate::views::dashboard::DashboardRowId::TopLevel(AgentId(
@@ -4928,8 +5114,6 @@ fn dashboard_peek_reply_to_running_agent_queues() {
                 time_ago: String::new(),
                 response_type: "Running\u{2026}".into(),
                 last_user_message: None,
-                last_agent_lines: Vec::new(),
-                last_response_truncated: false,
                 question: None,
                 options: Vec::new(),
                 request_id: None,
@@ -4937,6 +5121,10 @@ fn dashboard_peek_reply_to_running_agent_queues() {
             },
         ));
         d.peek_reply.set_text("after this");
+        d.begin_peek_viewport(
+            crate::views::dashboard::DashboardRowId::TopLevel(AgentId(0)),
+            &mut app.agents,
+        );
     }
     let effects = dispatch_dashboard_peek_reply(
         &mut app,
@@ -4948,7 +5136,17 @@ fn dashboard_peek_reply_to_running_agent_queues() {
     assert!(effects.is_empty());
     assert_eq!(app.agents[&AgentId(0)].session.queue_len(), 1);
     assert!(app.agents[&AgentId(0)].session.state.is_turn_running());
-    assert!(app.dashboard.as_ref().unwrap().peek_reply.text().is_empty());
+    let dashboard = app.dashboard.as_ref().unwrap();
+    assert!(dashboard.peek_reply.text().is_empty());
+    assert!(
+        dashboard
+            .peek_viewport
+            .as_ref()
+            .unwrap()
+            .page_flip_entry
+            .is_none(),
+        "a blocked drain must not claim the current turn as the queued reply"
+    );
 }
 
 /// Peek reply with an attached image drains into the queued
@@ -4970,8 +5168,6 @@ fn dashboard_peek_reply_with_image_sends_blocks() {
                 time_ago: String::new(),
                 response_type: "Idle".into(),
                 last_user_message: None,
-                last_agent_lines: Vec::new(),
-                last_response_truncated: false,
                 question: None,
                 options: Vec::new(),
                 request_id: None,
@@ -5028,8 +5224,6 @@ fn dashboard_peek_reply_image_with_whitespace_survives_rewind_restore() {
                 time_ago: String::new(),
                 response_type: "Idle".into(),
                 last_user_message: None,
-                last_agent_lines: Vec::new(),
-                last_response_truncated: false,
                 question: None,
                 options: Vec::new(),
                 request_id: None,
@@ -5104,8 +5298,6 @@ fn dashboard_peek_reply_with_image_queues_images() {
                 time_ago: String::new(),
                 response_type: "Running\u{2026}".into(),
                 last_user_message: None,
-                last_agent_lines: Vec::new(),
-                last_response_truncated: false,
                 question: None,
                 options: Vec::new(),
                 request_id: None,
@@ -5345,7 +5537,7 @@ fn dashboard_peek_auto_opens_for_selected_row() {
     let mut app = test_app_with_agent();
     mark_agent_nonempty(&mut app, AgentId(0));
     open_dashboard(&mut app);
-    let area = Rect::new(0, 0, 80, 24); // tall enough for the peek
+    let area = Rect::new(0, 0, 80, 40); // list-first: list floor 12 + peek min 8 + chrome
     let reg = crate::actions::ActionRegistry::defaults();
 
     // Select a row, then render → the peek opens by default.
@@ -5360,7 +5552,7 @@ fn dashboard_peek_auto_opens_for_selected_row() {
         &mut buf,
         area,
         app.dashboard.as_mut().unwrap(),
-        &app.agents,
+        &mut app.agents,
         &reg,
         None,
         &[],
@@ -5379,7 +5571,7 @@ fn dashboard_peek_auto_opens_for_selected_row() {
         &mut buf2,
         area,
         app.dashboard.as_mut().unwrap(),
-        &app.agents,
+        &mut app.agents,
         &reg,
         None,
         &[],
@@ -5402,7 +5594,7 @@ fn dashboard_peek_box_grows_for_multiline_reply() {
     use ratatui::buffer::Buffer;
     use ratatui::layout::Rect;
     let reg = crate::actions::ActionRegistry::defaults();
-    let area = Rect::new(0, 0, 80, 24);
+    let area = Rect::new(0, 0, 80, 40);
 
     let box_height_for = |reply_text: &str| -> u16 {
         let mut app = test_app_with_agent();
@@ -5417,7 +5609,7 @@ fn dashboard_peek_box_grows_for_multiline_reply() {
                 &mut buf,
                 area,
                 app.dashboard.as_mut().unwrap(),
-                &app.agents,
+                &mut app.agents,
                 &reg,
                 None,
                 &[],

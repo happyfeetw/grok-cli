@@ -61,18 +61,23 @@ pub fn user_grok_home() -> Option<PathBuf> {
 /// (Unix) or `grok-cli.exe` (Windows). Prefers `grok-cli` so restart/update
 /// paths do not pick up an official `grok` symlink in the same directory.
 pub fn grok_application() -> PathBuf {
+    grok_application_in(&grok_home())
+}
+
+/// [`grok_application`] under an explicit home instead of `$GROK_HOME`.
+pub fn grok_application_in(home: &std::path::Path) -> PathBuf {
     let fork = if cfg!(windows) {
         "grok-cli.exe"
     } else {
         "grok-cli"
     };
-    let path = grok_home().join("bin").join(fork);
+    let path = home.join("bin").join(fork);
     if path.exists() {
         return path;
     }
     // Legacy fallback for older fork installs that still used the `grok` name.
     let legacy = if cfg!(windows) { "grok.exe" } else { "grok" };
-    grok_home().join("bin").join(legacy)
+    home.join("bin").join(legacy)
 }
 
 /// System-wide config directory: `/etc/grok/` on Unix, `None` on Windows.

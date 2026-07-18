@@ -228,7 +228,7 @@ pub struct RemoteSettings {
     #[serde(default)]
     pub non_git_workspace_capture: Option<bool>,
     #[serde(default)]
-    pub persistent_local_shell: Option<bool>,
+    pub login_shell_capture: Option<bool>,
     /// Release channel: `"stable"` or `"alpha"`.
     /// Fallback when no local `[cli] channel` or `--alpha`/`--stable` flag is set.
     #[serde(default)]
@@ -761,6 +761,8 @@ pub struct RemoteSettings {
     /// remote settings verbatim-input flag; env (`GROK_COMPACTION_VERBATIM_INPUT`) and config override it. `None` = default (true).
     #[serde(default)]
     pub compaction_verbatim_input: Option<bool>,
+    #[serde(default)]
+    pub compaction_tool_choice: Option<String>,
     /// remote settings denylist of optional imagine tools to disable
     /// (e.g. `["image_edit"]`). When a tool is listed it is authoritatively
     /// removed from the toolset and local env/config can't re-enable it.
@@ -819,6 +821,9 @@ pub struct ContextualHintsRemote {
     /// Word-select tip after double-click fold/nav (settings discoverability).
     #[serde(default)]
     pub word_select: Option<bool>,
+    /// SSH wrap session-load tip (recommend `grok wrap ssh` for remote sessions).
+    #[serde(default)]
+    pub ssh_wrap: Option<bool>,
 }
 /// Tolerant deserializer for `Option<Vec<RemoteAnnouncement>>`.
 /// Parses as Vec<Value>, tries each as RemoteAnnouncement, drops failures.
