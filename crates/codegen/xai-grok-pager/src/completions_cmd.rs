@@ -10,16 +10,15 @@ use crate::app::PagerArgs;
 
 /// Generate and print the completion script for the given shell.
 pub fn run(shell: Shell) {
-    // Ensure the script always uses the public "grok" name (matches historical
-    // behavior and what the installers + docs expect).
-    let mut cmd = PagerArgs::command().name("grok");
+    // Product command for this fork is `grok-cli` (not official `grok`).
+    let mut cmd = PagerArgs::command().name("grok-cli");
     if shell != Shell::Zsh {
-        generate(shell, &mut cmd, "grok", &mut std::io::stdout());
+        generate(shell, &mut cmd, "grok-cli", &mut std::io::stdout());
         return;
     }
     // zsh needs post-processing (see fix_zsh_root_prompt_positional).
     let mut buf = Vec::new();
-    generate(shell, &mut cmd, "grok", &mut buf);
+    generate(shell, &mut cmd, "grok-cli", &mut buf);
     match String::from_utf8(buf) {
         Ok(script) => print!("{}", fix_zsh_root_prompt_positional(&script)),
         // clap_complete output is generated from Rust strings, so this arm is
@@ -63,9 +62,10 @@ fn fix_zsh_root_prompt_positional(script: &str) -> String {
             r#"words=($line[2] "${words[@]}")"#,
             r#"words=($line[1] "${words[@]}")"#,
         ),
+        // Product name is `grok-cli` (clap bin name).
         (
-            r#"curcontext="${curcontext%:*:*}:grok-command-$line[2]:""#,
-            r#"curcontext="${curcontext%:*:*}:grok-command-$line[1]:""#,
+            r#"curcontext="${curcontext%:*:*}:grok-cli-command-$line[2]:""#,
+            r#"curcontext="${curcontext%:*:*}:grok-cli-command-$line[1]:""#,
         ),
         (r#"case $line[2] in"#, r#"case $line[1] in"#),
     ] {
@@ -80,9 +80,9 @@ mod tests {
 
     /// Generate the zsh completion script exactly like `run` does.
     fn zsh_script() -> String {
-        let mut cmd = PagerArgs::command().name("grok");
+        let mut cmd = PagerArgs::command().name("grok-cli");
         let mut buf = Vec::new();
-        generate(Shell::Zsh, &mut cmd, "grok", &mut buf);
+        generate(Shell::Zsh, &mut cmd, "grok-cli", &mut buf);
         String::from_utf8(buf).expect("completion script is UTF-8")
     }
 
@@ -112,15 +112,19 @@ mod tests {
             "root dispatch must be shifted to $line[1]"
         );
         assert!(
-            fixed.contains(r#"curcontext="${curcontext%:*:*}:grok-command-$line[1]:""#),
+            fixed.contains(r#"curcontext="${curcontext%:*:*}:grok-cli-command-$line[1]:""#),
             "root dispatch context must use $line[1]"
         );
         // Subcommand dispatch blocks (already on $line[1]) must survive.
         assert!(
-            fixed.contains("grok-worktree-command-$line[1]"),
+            fixed.contains("grok-cli-worktree-command-$line[1]")
+                || fixed.contains("grok-worktree-command-$line[1]"),
             "nested subcommand dispatch must be untouched"
         );
         // The subcommand list itself must still be offered at the root.
-        assert!(fixed.contains("_grok_commands"), "root command list intact");
+        assert!(
+            fixed.contains("_grok_cli_commands") || fixed.contains("_grok_commands"),
+            "root command list intact"
+        );
     }
 }

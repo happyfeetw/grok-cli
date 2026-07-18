@@ -744,10 +744,11 @@ pub async fn run(
 fn print_exit_resume_hint(session_id: &str, minimal: bool, w: &mut impl Write) {
     let _ = writeln!(w);
     let _ = writeln!(w, "Resume this session with:");
+    // Product command is grok-cli (fork); do not print the official `grok` name.
     if minimal {
-        let _ = writeln!(w, "  grok --minimal --resume {session_id}");
+        let _ = writeln!(w, "  grok-cli --minimal --resume {session_id}");
     } else {
-        let _ = writeln!(w, "  grok --resume {session_id}");
+        let _ = writeln!(w, "  grok-cli --resume {session_id}");
     }
 }
 /// Screen-mode relaunch failure fallback (same quit tail as plain resume).
@@ -1774,7 +1775,7 @@ mod tests {
         print_exit_resume_hint("sess-abc", false, &mut buf);
         assert_eq!(
             String::from_utf8(buf).unwrap(),
-            "\nResume this session with:\n  grok --resume sess-abc\n"
+            "\nResume this session with:\n  grok-cli --resume sess-abc\n"
         );
     }
     #[test]
@@ -1783,7 +1784,7 @@ mod tests {
         print_exit_resume_hint("sess-abc", true, &mut buf);
         assert_eq!(
             String::from_utf8(buf).unwrap(),
-            "\nResume this session with:\n  grok --minimal --resume sess-abc\n"
+            "\nResume this session with:\n  grok-cli --minimal --resume sess-abc\n"
         );
     }
     #[test]

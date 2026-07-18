@@ -14,6 +14,17 @@ packaging, branding, and distribution.
 
 ## [Unreleased]
 
+## [0.1.227] - 2026-07-18
+
+### Fixed
+
+- User-facing product name is **grok-cli** (not official `grok`):
+  - exit resume hint: `grok-cli --resume …`
+  - screen-mode relaunch pasteable hint
+  - `grok-cli update` progress: "Updating grok-cli …" / reinstall message
+  - macOS multi-process update warning wording + `pgrep` match on `grok-cli`
+  - shell completion generator name `grok-cli`
+
 ## [0.1.226] - 2026-07-18
 
 ### Changed
@@ -103,7 +114,8 @@ packaging, branding, and distribution.
 - Build/CI robustness around `protoc` paths (historical Windows matrix work;
   current release target is macOS-only).
 
-[Unreleased]: https://github.com/happyfeetw/grok-cli/compare/v0.1.226...HEAD
+[Unreleased]: https://github.com/happyfeetw/grok-cli/compare/v0.1.227...HEAD
+[0.1.227]: https://github.com/happyfeetw/grok-cli/compare/v0.1.226...v0.1.227
 [0.1.226]: https://github.com/happyfeetw/grok-cli/compare/v0.1.225...v0.1.226
 [0.1.225]: https://github.com/happyfeetw/grok-cli/compare/v0.1.224...v0.1.225
 [0.1.224]: https://github.com/happyfeetw/grok-cli/compare/v0.1.223...v0.1.224
