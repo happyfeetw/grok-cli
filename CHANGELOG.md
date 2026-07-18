@@ -14,6 +14,15 @@ packaging, branding, and distribution.
 
 ## [Unreleased]
 
+## [0.1.226] - 2026-07-18
+
+### Changed
+
+- System prompt path discipline: do not invent filenames/extensions; discover
+  unknown paths with list/search (and manifests such as package.json `bin`)
+  before reading; after a not-found read, list the parent instead of chaining
+  speculative path guesses. Applies to primary and subagent prompts.
+
 ## [0.1.225] - 2026-07-18
 
 ### Changed
@@ -94,7 +103,8 @@ packaging, branding, and distribution.
 - Build/CI robustness around `protoc` paths (historical Windows matrix work;
   current release target is macOS-only).
 
-[Unreleased]: https://github.com/happyfeetw/grok-cli/compare/v0.1.225...HEAD
+[Unreleased]: https://github.com/happyfeetw/grok-cli/compare/v0.1.226...HEAD
+[0.1.226]: https://github.com/happyfeetw/grok-cli/compare/v0.1.225...v0.1.226
 [0.1.225]: https://github.com/happyfeetw/grok-cli/compare/v0.1.224...v0.1.225
 [0.1.224]: https://github.com/happyfeetw/grok-cli/compare/v0.1.223...v0.1.224
 [0.1.223]: https://github.com/happyfeetw/grok-cli/compare/v0.1.222...v0.1.223
