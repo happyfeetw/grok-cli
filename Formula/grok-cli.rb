@@ -11,21 +11,12 @@ class GrokCli < Formula
 
   on_macos do
     on_arm do
-<<<<<<< HEAD
       url "https://github.com/happyfeetw/grok-cli/releases/download/v0.1.227/grok-cli-0.1.227-darwin-arm64.tar.gz"
-      sha256 "13cc2412cb3a719c913183a78f3c31873f8d0940cad802ec87fd6334da156c81"
+      sha256 "0000000000000000000000000000000000000000000000000000000000000000"
     end
     on_intel do
       url "https://github.com/happyfeetw/grok-cli/releases/download/v0.1.227/grok-cli-0.1.227-darwin-x64.tar.gz"
-      sha256 "021c225fca58e26689ecf842564ba46923485ee6c4fc8a0c844fbbfb5e50e557"
-=======
-      url "https://github.com/happyfeetw/grok-cli/releases/download/v0.1.227/grok-cli-0.1.227-darwin-arm64.tar.gz"
-      sha256 "997a673ea7635bb9d3a34b0d12d0bad226e5556ee0161d4c7279b433970801e3"
-    end
-    on_intel do
-      url "https://github.com/happyfeetw/grok-cli/releases/download/v0.1.227/grok-cli-0.1.227-darwin-x64.tar.gz"
-      sha256 "23d50f3ac83ff6b3e22b1ef66cacc3f1108f6d5e7776f52ab9ccf3705200da5c"
->>>>>>> e3dcd71 (fix(branding): use grok-cli in resume hints and update messages)
+      sha256 "0000000000000000000000000000000000000000000000000000000000000000"
     end
   end
 
