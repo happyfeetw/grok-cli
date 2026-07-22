@@ -1,0 +1,49 @@
+# Lightweight policy checks for this fork.
+# - rust-toolchain.toml channel must match release-macos.yml pin
+# - Cargo.lock third-party packages must match upstream xai-org/grok-build main
+#
+# Does not build the full binary (release workflow does that).
+
+name: Upstream policy
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - ".github/workflows/release-macos.yml"
+      - ".github/workflows/upstream-policy.yml"
+      - "packaging/scripts/merge-upstream.sh"
+      - "packaging/scripts/verify-upstream-policy.sh"
+  pull_request:
+    paths:
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - ".github/workflows/release-macos.yml"
+      - ".github/workflows/upstream-policy.yml"
+      - "packaging/scripts/merge-upstream.sh"
+      - "packaging/scripts/verify-upstream-policy.sh"
+  workflow_dispatch:
+
+jobs:
+  policy:
+    name: toolchain + lock vs upstream
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Add upstream remote and fetch
+        run: |
+          set -euo pipefail
+          git remote add upstream https://github.com/xai-org/grok-build.git 2>/dev/null || \
+            git remote set-url upstream https://github.com/xai-org/grok-build.git
+          git fetch upstream main --depth=1
+
+      - name: Verify toolchain pin + Cargo.lock third-party
+        run: |
+          set -euo pipefail
+          chmod +x packaging/scripts/merge-upstream.sh packaging/scripts/verify-upstream-policy.sh
+          packaging/scripts/verify-upstream-policy.sh

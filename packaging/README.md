@@ -10,6 +10,16 @@ Distribution channels for this fork:
 | **Homebrew** | `happyfeetw/grok-cli` tap → `grok-cli` | macOS arm64 + x64 |
 | **GitHub Releases** | `grok-cli-<version>-darwin-<arch>.tar.gz` | macOS only |
 
+## Upstream sync (lock + toolchain)
+
+When merging [`xai-org/grok-build`](https://github.com/xai-org/grok-build):
+
+- **Do not** run `cargo generate-lockfile` or unconstrained `cargo update`
+  (third-party drift / MSRV failures on pinned rustc).
+- Prefer: `packaging/scripts/merge-upstream.sh` then
+  `packaging/scripts/verify-upstream-policy.sh`.
+- Full policy: [`docs/upstream-sync.md`](../docs/upstream-sync.md).
+
 ## Version management (upstream-compatible + SemVer 2.0)
 
 This fork follows the **official Grok Build** version contract for the binary:
