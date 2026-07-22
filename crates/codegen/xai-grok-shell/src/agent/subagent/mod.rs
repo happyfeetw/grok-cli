@@ -22,8 +22,8 @@ use crate::terminal::AsyncTerminalRunner;
 use crate::tools::ToolContext;
 use crate::upload::trace::{
     GCS_SCHEMA_VERSION, PromptMetadata, SubagentSpawnedRef, TurnResultMetadata,
-    local_sandbox_telemetry, upload_config, upload_metadata, upload_session_state,
-    upload_subagent_metadata, upload_turn_result,
+    local_sandbox_telemetry, upload_metadata, upload_session_state, upload_subagent_metadata,
+    upload_turn_result,
 };
 use crate::upload::turn::{PromptTraceContext, complete_prompt_trace};
 use agent_client_protocol as acp;
@@ -59,6 +59,7 @@ pub(crate) struct SubagentTracker {
     pub subagent_id: String,
     pub parent_session_id: String,
     pub parent_prompt_id: Option<String>,
+    pub owner: SubagentOwner,
     pub child_session_id: acp::SessionId,
     pub subagent_type: String,
     pub persona: Option<String>,
@@ -84,6 +85,7 @@ pub(crate) struct SubagentTracker {
     pub run_in_background: bool,
     /// Mirrors `SubagentRequest::surface_completion`.
     pub surface_completion: bool,
+    pub completion_output_cap: Option<usize>,
     /// Set when a `block=true` waiter consumed this subagent's result.
     pub block_waited: bool,
     /// Set when the model explicitly killed this subagent via the kill tool.
@@ -133,7 +135,6 @@ impl AutoCompactThresholdTiers {
     }
 }
 /// Everything the coordinator needs from MvpAgent to spawn a child session.
-///
 /// Avoids passing `&MvpAgent` (which would require the coordinator to know
 /// about the full agent struct). Built by `MvpAgent::build_subagent_spawn_context()`.
 pub(crate) struct SubagentSpawnContext {
@@ -165,6 +166,8 @@ pub(crate) struct SubagentSpawnContext {
     pub auth: Option<crate::auth::GrokAuth>,
     pub parent_cwd: PathBuf,
     pub parent_session_id: String,
+    /// The parent's cutoff at spawn, applied to the child's first turn. `None` if unset.
+    pub inherited_tool_overrides: Option<xai_grok_sampling_types::ToolOverrides>,
     pub yolo_mode: bool,
     pub subagent_event_tx: mpsc::UnboundedSender<SubagentEvent>,
     pub parent_depth: u32,
@@ -227,6 +230,7 @@ pub(crate) struct SubagentSpawnContext {
     pub write_file_enabled: bool,
     /// Whether goal mode (`/goal`) is enabled.
     pub goal_enabled: bool,
+    pub background_workflows_enabled: bool,
     /// Whether the `ask_user_question` tool is exposed to this subagent,
     /// inherited from the parent session (see `build_subagent_spawn_context`).
     pub ask_user_question_enabled: bool,
@@ -363,7 +367,7 @@ pub(crate) struct SubagentSpawnContext {
     /// Parent's `blocking_wait_depth` (same `Arc`). A foreground spawn holds a
     /// `BlockingWaitGuard` on it for the blocking await so `queue_input` routes
     /// a prompt sent during the wait onto send-now; never for background spawns.
-    pub parent_blocking_wait_depth: Arc<std::sync::atomic::AtomicUsize>,
+    pub parent_blocking_wait_depth: Arc<crate::tools::tool_context::BlockingWaitState>,
 }
 impl SubagentSpawnContext {
     /// Check if a subagent is enabled via the toggle config.
@@ -478,6 +482,7 @@ pub(crate) struct CompletedSubagent {
     pub subagent_id: String,
     pub parent_session_id: String,
     pub parent_prompt_id: Option<String>,
+    pub owner: SubagentOwner,
     pub child_session_id: String,
     pub description: String,
     pub subagent_type: String,
@@ -501,12 +506,33 @@ pub(crate) struct CompletedSubagent {
     pub block_waited: bool,
     /// Set when the model explicitly killed this subagent via the kill tool.
     pub explicitly_killed: bool,
+    pub completion_output_cap: Option<usize>,
     /// Directory whose `output.json` holds the output text; when set, the
     /// stored `result.output` is cleared and `lookup` reads from disk.
     /// `None` (failures, empty outputs, failed writes) serves from memory.
     /// Process-scoped and local-only: resume survives a restart via
     /// `meta.json`, and trace upload carries the text to GCS.
     pub persisted_output_dir: Option<PathBuf>,
+}
+pub(crate) fn cap_completion_output(
+    output: &std::sync::Arc<str>,
+    cap: Option<usize>,
+) -> std::sync::Arc<str> {
+    match cap {
+        Some(cap) if output.len() > cap => {
+            let mut end = cap;
+            while end > 0 && !output.is_char_boundary(end) {
+                end -= 1;
+            }
+            std::sync::Arc::from(format!(
+                "{}\n[output truncated: {} of {} bytes shown]",
+                &output[..end],
+                end,
+                output.len()
+            ))
+        }
+        _ => output.clone(),
+    }
 }
 /// Lightweight entry for subagents that have been requested but are still
 /// initializing (creating worktree, resolving config, spawning session).
@@ -518,6 +544,7 @@ pub(crate) struct PendingSubagent {
     pub persona: Option<String>,
     pub parent_prompt_id: Option<String>,
     pub parent_session_id: String,
+    pub owner: SubagentOwner,
     pub started_at: std::time::Instant,
     pub run_in_background: bool,
     /// Mirrors `SubagentRequest::surface_completion`.
@@ -538,6 +565,7 @@ struct FailureCompletion<'a> {
     description: String,
     parent_prompt_id: Option<String>,
     parent_session_id: String,
+    owner: SubagentOwner,
     persona: Option<String>,
     started_at: std::time::Instant,
     error: &'a str,
@@ -597,6 +625,7 @@ pub(crate) struct SubagentCoordinator {
     /// marks ledgers by itself (a true apply-miss marks them at fold time).
     /// Cleared on freeze/cancel. See AGENTS.md rule 3 for the completeness model.
     subagent_usage_not_applied_prompts: std::collections::HashSet<String>,
+    loop_owned: HashMap<String, String>,
 }
 /// Cap on the completed map (entries are small: identity, counts, and an
 /// error string; successful output text lives in `output.json`).
@@ -746,6 +775,9 @@ pub(crate) struct SubagentProvenance {
     pub(crate) fork_parent_prompt_id: Option<String>,
     /// ID of the source subagent this session was resumed from.
     pub(crate) resumed_from: Option<String>,
+}
+fn subagent_blocks_parent_turn(request: &SubagentRequest) -> bool {
+    !request.run_in_background && !request.owner.is_workflow()
 }
 /// Convert a `std::time::Instant` to approximate epoch milliseconds.
 ///
@@ -899,13 +931,17 @@ fn log_subagent_model_resolution(
     xai_grok_telemetry::unified_log::debug(
         "subagent model resolved",
         None,
-        Some(serde_json::json!(
-            { "agent" : agent_name, "priority" : priority, "child_model" :
-            resolved_id.0.as_ref(), "child_base_url" : & resolved.base_url,
-            "child_key_prefix" : child_key, "parent_model" : & parent.model,
-            "parent_base_url" : & parent.base_url, "parent_key_prefix" : parent_key,
-            "keys_match" : keys_match, }
-        )),
+        Some(serde_json::json!({
+            "agent": agent_name,
+            "priority": priority,
+            "child_model": resolved_id.0.as_ref(),
+            "child_base_url": &resolved.base_url,
+            "child_key_prefix": child_key,
+            "parent_model": &parent.model,
+            "parent_base_url": &parent.base_url,
+            "parent_key_prefix": parent_key,
+            "keys_match": keys_match,
+        })),
     );
 }
 /// Read the parent session's actual current sampling config.
@@ -969,13 +1005,14 @@ async fn read_parent_sampling_config(
             xai_grok_telemetry::unified_log::debug(
                 "subagent read parent config (live)",
                 None,
-                Some(serde_json::json!(
-                    { "parent_model" : & inherited.model, "parent_base_url" : &
-                    inherited.base_url, "parent_key_prefix" : key_prefix(& inherited
-                    .api_key), "session_model_id" : model_id.0.as_ref(),
-                    "global_model_id" : global_model_id.0.as_ref(), "source" :
-                    "chat_state", }
-                )),
+                Some(serde_json::json!({
+                    "parent_model": &inherited.model,
+                    "parent_base_url": &inherited.base_url,
+                    "parent_key_prefix": key_prefix(&inherited.api_key),
+                    "session_model_id": model_id.0.as_ref(),
+                    "global_model_id": global_model_id.0.as_ref(),
+                    "source": "chat_state",
+                })),
             );
             return (inherited, model_id);
         }
@@ -987,12 +1024,13 @@ async fn read_parent_sampling_config(
     xai_grok_telemetry::unified_log::warn(
         "subagent read parent config (fallback)",
         None,
-        Some(serde_json::json!(
-            { "parent_model" : & ctx.sampling_config.model, "parent_base_url" : & ctx
-            .sampling_config.base_url, "parent_key_prefix" : key_prefix(& ctx
-            .sampling_config.api_key), "source" : "spawn_context_baseline",
-            "has_chat_state" : ctx.parent_chat_state.is_some(), }
-        )),
+        Some(serde_json::json!({
+            "parent_model": &ctx.sampling_config.model,
+            "parent_base_url": &ctx.sampling_config.base_url,
+            "parent_key_prefix": key_prefix(&ctx.sampling_config.api_key),
+            "source": "spawn_context_baseline",
+            "has_chat_state": ctx.parent_chat_state.is_some(),
+        })),
     );
     let mut fallback = ctx.sampling_config.clone();
     fallback.supports_backend_search = ctx
@@ -1050,14 +1088,17 @@ fn resolve_model_override_to_config(
     xai_grok_telemetry::unified_log::debug(
         "subagent resolve_model_override_to_config",
         None,
-        Some(serde_json::json!(
-            { "model_id" : model_id, "canonical_model" : canonical_model_id.0
-            .as_ref(), "resolved_model_raw" : & config.model, "base_url" : & config
-            .base_url, "key_prefix" : key_prefix(& config.api_key),
-            "has_own_credentials" : entry.has_own_credentials(), "has_session_key" :
-            has_session_key, "auth_type" : format!("{:?}", resolved_auth_type),
-            "auth_method_id" : ctx.auth_method_id.0.as_ref(), }
-        )),
+        Some(serde_json::json!({
+            "model_id": model_id,
+            "canonical_model": canonical_model_id.0.as_ref(),
+            "resolved_model_raw": &config.model,
+            "base_url": &config.base_url,
+            "key_prefix": key_prefix(&config.api_key),
+            "has_own_credentials": entry.has_own_credentials(),
+            "has_session_key": has_session_key,
+            "auth_type": format!("{:?}", resolved_auth_type),
+            "auth_method_id": ctx.auth_method_id.0.as_ref(),
+        })),
     );
     Some((config, canonical_model_id))
 }
@@ -1140,7 +1181,8 @@ fn conversation_tail_is_complete(
 ) -> bool {
     use xai_grok_sampling_types::conversation::ConversationItem;
     matches!(
-        items.last(), Some(ConversationItem::Assistant(a)) if a.tool_calls.is_empty()
+        items.last(),
+        Some(ConversationItem::Assistant(a)) if a.tool_calls.is_empty()
     )
 }
 /// Decide the live-fork context.
@@ -1233,10 +1275,7 @@ fn stamp_live_fork_session_metadata(
 ) {
     let dir = session::persistence::session_dir(child_session_info);
     if let Err(e) = std::fs::create_dir_all(&dir) {
-        tracing::warn!(
-            error = % e,
-            "live fork: could not create child session dir for metadata stamp"
-        );
+        tracing::warn!(error = %e, "live fork: could not create child session dir for metadata stamp");
         return;
     }
     let summary_path = dir.join("summary.json");
@@ -1258,7 +1297,7 @@ fn stamp_live_fork_session_metadata(
     if let Ok(bytes) = serde_json::to_vec_pretty(summary)
         && let Err(e) = std::fs::write(&summary_path, bytes)
     {
-        tracing::warn!(error = % e, "live fork: failed to write forked session summary");
+        tracing::warn!(error = %e, "live fork: failed to write forked session summary");
     }
 }
 enum BootstrapInitialContext {
@@ -1279,7 +1318,8 @@ async fn bootstrap_initial_context(
 ) -> BootstrapInitialContext {
     if request.fork_context && request.resume_from.is_some() {
         tracing::info!(
-            subagent_id = % request.id, resume_from = ? request.resume_from,
+            subagent_id = %request.id,
+            resume_from = ?request.resume_from,
             resume_resolved = resume_source.is_some(),
             "resume_from and fork_context both set; resolved resume wins (fail-closed on copy error, never forks)"
         );
@@ -1341,9 +1381,11 @@ async fn bootstrap_initial_context(
                     ));
                 }
                 tracing::info!(
-                    subagent_id = % request.id, source_subagent = % source.subagent_id,
-                    chat_messages = result.chat_messages_copied, tool_state = result
-                    .tool_state_copied, estimated_tokens,
+                    subagent_id = %request.id,
+                    source_subagent = %source.subagent_id,
+                    chat_messages = result.chat_messages_copied,
+                    tool_state = result.tool_state_copied,
+                    estimated_tokens,
                     "Resume-copied source child session data into new child"
                 );
                 BootstrapInitialContext::Ready(resume_initial_context(conversation))
@@ -1373,8 +1415,10 @@ async fn bootstrap_initial_context(
     if let Some(items) = live_items {
         let ctx_out = verbatim_or_normalize_fork(items, child_context_window);
         tracing::info!(
-            subagent_id = % request.id, subagent_type = % request.subagent_type,
-            loaded_items = ctx_out.conversation.len(), source = ? ctx_out.source,
+            subagent_id = %request.id,
+            subagent_type = %request.subagent_type,
+            loaded_items = ctx_out.conversation.len(),
+            source = ?ctx_out.source,
             verbatim = ctx_out.verbatim_fork,
             "Forked context from live parent_chat_state"
         );
@@ -1415,16 +1459,17 @@ async fn bootstrap_initial_context(
         return match storage.copy_session_data_sync(parent_info, child_session_info, copy_options) {
             Ok(result) => {
                 tracing::info!(
-                    subagent_id = % request.id, subagent_type = % request.subagent_type,
-                    chat_messages = result.chat_messages_copied, tool_state = result
-                    .tool_state_copied,
+                    subagent_id = %request.id,
+                    subagent_type = %request.subagent_type,
+                    chat_messages = result.chat_messages_copied,
+                    tool_state = result.tool_state_copied,
                     "Fork-copied parent session data into child (disk fallback)"
                 );
                 let items = storage
                     .load_chat_history_from_dir(child_session_dir)
                     .unwrap_or_else(|e| {
                         tracing::warn!(
-                            error = % e,
+                            error = %e,
                             "Failed to load forked chat history, starting with empty context"
                         );
                         vec![]
@@ -1434,8 +1479,9 @@ async fn bootstrap_initial_context(
             Err(e) => {
                 let err_msg = format!("{e}");
                 tracing::warn!(
-                    subagent_id = % request.id, subagent_type = % request.subagent_type,
-                    error = % e,
+                    subagent_id = %request.id,
+                    subagent_type = %request.subagent_type,
+                    error = %e,
                     "Failed to fork-copy parent session, falling back to fresh"
                 );
                 BootstrapInitialContext::Ready(InitialContext {
@@ -1449,7 +1495,8 @@ async fn bootstrap_initial_context(
         };
     }
     tracing::warn!(
-        subagent_id = % request.id, subagent_type = % request.subagent_type,
+        subagent_id = %request.id,
+        subagent_type = %request.subagent_type,
         "fork_context=true but no live parent conversation or parent_session_info; falling back to fresh"
     );
     BootstrapInitialContext::Ready(InitialContext {
@@ -1520,7 +1567,8 @@ fn resume_inherited_cwd(source: Option<&ResumeSourceData>) -> Option<&str> {
     }
     if !Path::new(&source.child_cwd).is_dir() {
         tracing::warn!(
-            source_subagent_id = % source.subagent_id, child_cwd = % source.child_cwd,
+            source_subagent_id = %source.subagent_id,
+            child_cwd = %source.child_cwd,
             "Resume source cwd no longer exists; using parent workspace"
         );
         return None;
@@ -1896,8 +1944,8 @@ async fn await_subagent_turn_or_cancellation(
     cancel_token: CancellationToken,
 ) -> SubagentWaitOutcome {
     tokio::select! {
-        _ = cancel_token.cancelled() => SubagentWaitOutcome::Cancelled, turn_result =
-        prompt_rx => SubagentWaitOutcome::TurnResult(Box::new(turn_result)),
+        _ = cancel_token.cancelled() => SubagentWaitOutcome::Cancelled,
+        turn_result = prompt_rx => SubagentWaitOutcome::TurnResult(Box::new(turn_result)),
     }
 }
 /// Max time a blocking `spawn_subagent` may hold the turn before it is
@@ -2018,13 +2066,17 @@ fn inject_subagent_completed_prompt(
     }
     let summary = SubagentCompletionSummary {
         subagent_id: subagent_id.to_string(),
+        owner_session_id: request.parent_session_id.clone(),
         subagent_type: request.subagent_type.clone(),
         description: request.description.clone(),
         success: result.success && !result.cancelled,
         duration_ms: result.duration_ms,
         tool_calls: result.tool_calls,
         turns: result.turns,
-        output: result.output.clone(),
+        output: cap_completion_output(
+            &result.output,
+            request.runtime_overrides.completion_output_cap,
+        ),
     };
     let message = xai_grok_tools::reminders::task_completion::format_subagent_completion(
         &summary,
@@ -2056,6 +2108,7 @@ fn inject_subagent_completed_prompt(
             json_schema: None,
             send_now: false,
             admission: None,
+            tool_overrides_update: None,
             respond_to,
             persist_ack: None,
             parsed_prompt_tx: None,
@@ -2079,10 +2132,19 @@ fn inject_subagent_completed_prompt(
 }
 /// Post-`insert_pending`, pre-`SubagentSpawned` failure: just send via oneshot;
 /// `PendingGuard::drop` handles the queue side effects.
-fn send_failure(request: SubagentRequest, error: &str) {
+pub(crate) fn send_failure(request: SubagentRequest, error: &str) {
     let _ = request.result_tx.send(SubagentResult {
         success: false,
         error: Some(error.to_string()),
+        ..Default::default()
+    });
+}
+fn send_pre_spawn_cancelled(request: SubagentRequest, error: &str) {
+    let _ = request.result_tx.send(SubagentResult {
+        success: false,
+        cancelled: true,
+        error: Some(error.to_string()),
+        subagent_id: request.id,
         ..Default::default()
     });
 }
@@ -2101,6 +2163,7 @@ fn send_pre_spawn_failure(
         subagent_type,
         description,
         parent_prompt_id,
+        owner,
         result_tx,
         run_in_background,
         surface_completion,
@@ -2114,6 +2177,7 @@ fn send_pre_spawn_failure(
             description,
             parent_prompt_id,
             ctx.parent_session_id.clone(),
+            owner,
             error,
             surface_completion,
         );
@@ -2208,7 +2272,9 @@ async fn cancel_pending_subagent_at_promote(
         && let Err(e) = crate::session::worktree::remove_subagent_worktree(wt_path).await
     {
         tracing::warn!(
-            subagent_id, worktree_path = % wt_path.display(), error = % e,
+            subagent_id,
+            worktree_path = %wt_path.display(),
+            error = %e,
             "failed to remove pristine worktree for killed-while-pending subagent"
         );
     }
@@ -2340,7 +2406,8 @@ fn spawn_progress_publisher(
         let heartbeat_max = tokio::time::Duration::from_secs(8);
         loop {
             tokio::select! {
-                _ = cancel_token.cancelled() => break, _ = interval.tick() => {}
+                _ = cancel_token.cancelled() => break,
+                _ = interval.tick() => {}
             }
             let signals = match signals_handle.snapshot().await {
                 Some(s) => s,
@@ -2601,12 +2668,12 @@ fn write_subagent_meta(dir: &Path, meta: &SubagentMeta) -> bool {
     let json = match serde_json::to_string_pretty(meta) {
         Ok(json) => json,
         Err(e) => {
-            tracing::warn!(error = % e, "failed to serialize subagent meta");
+            tracing::warn!(error = %e, "failed to serialize subagent meta");
             return false;
         }
     };
     if let Err(e) = atomic_write(&dir.join("meta.json"), &json) {
-        tracing::warn!(error = % e, "failed to write subagent meta");
+        tracing::warn!(error = %e, "failed to write subagent meta");
         return false;
     }
     true
@@ -2633,12 +2700,12 @@ fn write_subagent_output(dir: &Path, output: &str) -> bool {
     let json = match serde_json::to_string(&file) {
         Ok(json) => json,
         Err(e) => {
-            tracing::warn!(error = % e, "failed to serialize subagent output");
+            tracing::warn!(error = %e, "failed to serialize subagent output");
             return false;
         }
     };
     if let Err(e) = atomic_write(&dir.join("output.json"), &json) {
-        tracing::warn!(error = % e, "failed to write subagent output");
+        tracing::warn!(error = %e, "failed to write subagent output");
         return false;
     }
     true
@@ -2649,7 +2716,7 @@ pub(crate) fn read_subagent_output(dir: &Path) -> Option<String> {
     let file: SubagentOutputFile = match serde_json::from_str(&data) {
         Ok(file) => file,
         Err(e) => {
-            tracing::warn!(error = % e, "failed to parse subagent output.json");
+            tracing::warn!(error = %e, "failed to parse subagent output.json");
             return None;
         }
     };
@@ -2692,18 +2759,12 @@ fn update_subagent_meta_snapshot_ref(dir: &Path, snapshot_ref: &str, status: &st
         Ok(data) => match serde_json::from_str::<SubagentMeta>(&data) {
             Ok(meta) => meta,
             Err(e) => {
-                tracing::warn!(
-                    error = % e,
-                    "failed to parse subagent meta; snapshot_ref not persisted (resume pointer lost)"
-                );
+                tracing::warn!(error = %e, "failed to parse subagent meta; snapshot_ref not persisted (resume pointer lost)");
                 return false;
             }
         },
         Err(e) => {
-            tracing::warn!(
-                error = % e,
-                "failed to read subagent meta; snapshot_ref not persisted (resume pointer lost)"
-            );
+            tracing::warn!(error = %e, "failed to read subagent meta; snapshot_ref not persisted (resume pointer lost)");
             return false;
         }
     };
@@ -2864,13 +2925,15 @@ pub(crate) fn reconcile_orphaned_subagents(
             Some(m) if m.status == "running" => {
                 if let Some(finish) = coordinator.completed_finish(&subagent_id) {
                     tracing::info!(
-                        subagent_id = % subagent_id, parent_session_id,
+                        subagent_id = %subagent_id,
+                        parent_session_id,
                         "Re-emitting finish for completed subagent with a lost terminal meta write"
                     );
                     emit_subagent_notification(gateway, parent_session_id, finish, parent_cmd_tx);
                 } else {
                     tracing::info!(
-                        subagent_id = % m.subagent_id, parent_session_id,
+                        subagent_id = %m.subagent_id,
+                        parent_session_id,
                         "Reconciling orphaned subagent left running by a previous process"
                     );
                     finalize_orphaned_subagent(&subagent_dir, m, gateway, parent_cmd_tx);
@@ -2878,7 +2941,9 @@ pub(crate) fn reconcile_orphaned_subagents(
             }
             Some(m) => {
                 tracing::info!(
-                    subagent_id = % subagent_id, parent_session_id, status = % m.status,
+                    subagent_id = %subagent_id,
+                    parent_session_id,
+                    status = %m.status,
                     "Re-emitting finish for rewound subagent (terminal meta survived)"
                 );
                 emit_subagent_notification(
@@ -2904,7 +2969,8 @@ pub(crate) fn reconcile_orphaned_subagents(
                     continue;
                 };
                 tracing::info!(
-                    subagent_id = % subagent_id, parent_session_id,
+                    subagent_id = %subagent_id,
+                    parent_session_id,
                     "Reconciling inherited subagent with no local meta (cancelled)"
                 );
                 emit_subagent_notification(

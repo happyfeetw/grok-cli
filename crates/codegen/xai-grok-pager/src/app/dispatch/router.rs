@@ -76,16 +76,16 @@ use super::settings::setters::{
     clear_default_model, clear_fork_secondary_model, preview_auto_dark_theme,
     preview_auto_light_theme, preview_theme, set_ask_user_question_timeout_enabled,
     set_auto_dark_theme, set_auto_light_theme, set_auto_update, set_collapsed_edit_blocks,
-    set_compact_mode, set_contextual_hint_image_input, set_contextual_hint_plan_mode,
-    set_contextual_hint_send_now, set_contextual_hint_small_screen, set_contextual_hint_ssh_wrap,
-    set_contextual_hint_undo, set_contextual_hint_word_select, set_default_model,
-    set_default_selected_permission, set_display_refresh_auto_cadence, set_fork_secondary_model,
-    set_group_tool_verbs, set_hunk_tracker_mode, set_invert_scroll, set_keep_text_selection,
-    set_max_thoughts_width, set_multiline_mode, set_page_flip_on_send, set_prompt_suggestions,
-    set_remember_tool_approvals, set_render_mermaid, set_respect_manual_folds, set_screen_mode,
-    set_scroll_lines, set_scroll_mode, set_scroll_speed, set_show_thinking_blocks, set_show_tips,
-    set_simple_mode, set_theme, set_timeline, set_timestamps, set_vim_mode, set_voice_capture_mode,
-    set_voice_stt_language,
+    set_combine_queued_prompts, set_compact_mode, set_contextual_hint_image_input,
+    set_contextual_hint_plan_mode, set_contextual_hint_send_now, set_contextual_hint_small_screen,
+    set_contextual_hint_ssh_wrap, set_contextual_hint_undo, set_contextual_hint_word_select,
+    set_default_model, set_default_selected_permission, set_display_refresh_auto_cadence,
+    set_fork_secondary_model, set_group_tool_verbs, set_hunk_tracker_mode, set_invert_scroll,
+    set_keep_text_selection, set_max_thoughts_width, set_multiline_mode, set_page_flip_on_send,
+    set_prompt_suggestions, set_remember_tool_approvals, set_render_mermaid,
+    set_respect_manual_folds, set_screen_mode, set_scroll_lines, set_scroll_mode, set_scroll_speed,
+    set_show_thinking_blocks, set_show_tips, set_simple_mode, set_theme, set_timeline,
+    set_timestamps, set_vim_mode, set_voice_capture_mode, set_voice_stt_language,
 };
 use super::settings::ui::{
     dispatch_confirm_reset_setting, dispatch_open_command_palette, dispatch_open_howto_guides,
@@ -94,7 +94,8 @@ use super::settings::ui::{
     dispatch_toggle_vim_mode,
 };
 use super::status::{
-    dispatch_copy_session_id, dispatch_open_gboom, dispatch_share_session,
+    dispatch_copy_session_id, dispatch_manage_billing, dispatch_open_gboom,
+    dispatch_privacy_banner_accept, dispatch_privacy_banner_customize, dispatch_share_session,
     dispatch_show_context_info, dispatch_show_privacy_info, dispatch_show_queue,
     dispatch_show_release_notes, dispatch_show_session_info, dispatch_show_tasks,
     dispatch_show_usage, set_coding_data_sharing,
@@ -373,6 +374,14 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
             }],
             None => vec![],
         },
+        Action::QueueHoldEditShared { id } => match active_agent_session_id(app) {
+            Some(session_id) => vec![Effect::QueueHoldEdit { session_id, id }],
+            None => vec![],
+        },
+        Action::QueueReleaseEditShared { id } => match active_agent_session_id(app) {
+            Some(session_id) => vec![Effect::QueueReleaseEdit { session_id, id }],
+            None => vec![],
+        },
         Action::QueueInterjectShared {
             id,
             expected_version,
@@ -506,7 +515,9 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
             crate::unified_log::info(
                 "mouse_reporting_toggle.dispatch",
                 None,
-                Some(serde_json::json!({ "phase" : "entered_dispatch_arm", })),
+                Some(serde_json::json!({
+                    "phase": "entered_dispatch_arm",
+                })),
             );
             dispatch_toggle_mouse_capture(app);
             vec![]
@@ -550,8 +561,8 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
             dispatch_copy_block_content(app);
             vec![]
         }
-        Action::CopyAssistantMessage { n } => {
-            dispatch_copy_assistant_message(app, n);
+        Action::CopyAssistantMessage { n, file_path } => {
+            dispatch_copy_assistant_message(app, n, file_path);
             vec![]
         }
         Action::ExportConversation { file_path } => {
@@ -659,14 +670,21 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
             };
             if let Some(ref mut modal) = agent.extensions_modal {
                 modal.skills_data = crate::views::extensions_modal::TabDataState::Loading;
+                modal.workflows_data = crate::views::extensions_modal::TabDataState::Loading;
             }
             let Some(session_id) = agent.session.session_id.clone() else {
                 return vec![];
             };
-            vec![Effect::FetchSkillsList {
-                agent_id: id,
-                session_id,
-            }]
+            vec![
+                Effect::FetchSkillsList {
+                    agent_id: id,
+                    session_id: session_id.clone(),
+                },
+                Effect::FetchWorkflowsList {
+                    agent_id: id,
+                    session_id,
+                },
+            ]
         }
         Action::RefreshMcpList => {
             let ActiveView::Agent(id) = app.active_view else {
@@ -917,6 +935,7 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::RenameSession { title } => dispatch_rename_session(app, title),
         Action::ShowContextInfo => dispatch_show_context_info(app),
         Action::ShowUsage => dispatch_show_usage(app),
+        Action::ManageBilling => dispatch_manage_billing(app),
         Action::ShowQueue => dispatch_show_queue(app),
         Action::ShowTasks => dispatch_show_tasks(app),
         Action::ShowPlan => dispatch_show_plan(app),
@@ -964,6 +983,7 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::SetTimestamps(v) => set_timestamps(app, v),
         Action::SetTimeline(v) => set_timeline(app, v),
         Action::SetPageFlipOnSend(v) => set_page_flip_on_send(app, v),
+        Action::SetCombineQueuedPrompts(v) => set_combine_queued_prompts(app, v),
         Action::SetSimpleMode(v) => set_simple_mode(app, v),
         Action::SetContextualHintUndo(v) => set_contextual_hint_undo(app, v),
         Action::SetContextualHintPlanMode(v) => set_contextual_hint_plan_mode(app, v),
@@ -986,7 +1006,10 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::PreviewTheme(v) => preview_theme(app, v),
         Action::PreviewAutoDarkTheme(v) => preview_auto_dark_theme(app, v),
         Action::PreviewAutoLightTheme(v) => preview_auto_light_theme(app, v),
-        Action::OpenSettings => dispatch_open_settings(app),
+        Action::OpenSettings => dispatch_open_settings(app, None),
+        Action::OpenSettingsFocus { key } => dispatch_open_settings(app, Some(key)),
+        Action::PrivacyBannerAccept => dispatch_privacy_banner_accept(app),
+        Action::PrivacyBannerCustomize => dispatch_privacy_banner_customize(app),
         Action::OpenCommandPalette => dispatch_open_command_palette(app),
         Action::OpenHowtoGuides => dispatch_open_howto_guides(app),
         Action::OpenResetConfirm { key } => dispatch_open_reset_confirm(app, key),
@@ -1134,6 +1157,34 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
             );
             effects
         }
+        Action::DoctorFixConfirmed { target, plan } => {
+            let Some(target) = super::task_result::current_doctor_target(app, &target) else {
+                super::task_result::deliver_doctor_message(
+                    app,
+                    target.agent_id,
+                    "This fix was cancelled because the session changed. Run `/doctor fix` again."
+                        .to_owned(),
+                );
+                return vec![];
+            };
+            if let Some(agent) = app.agents.get_mut(&target.agent_id) {
+                agent
+                    .scrollback
+                    .push_block(crate::scrollback::block::RenderBlock::system(format!(
+                        "Applying {}…",
+                        plan.id
+                    )));
+            }
+            vec![Effect::ApplyDoctorFix { target, plan }]
+        }
+        Action::DoctorFixCancelled(target) => {
+            super::task_result::deliver_doctor_message(
+                app,
+                target.agent_id,
+                "Fix cancelled.".to_owned(),
+            );
+            vec![]
+        }
         Action::AgentTypeMismatchAnswered {
             start_new,
             model_id,
@@ -1162,15 +1213,22 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
             path,
             refresh_agents_modal,
         } => {
-            if let ActiveView::Agent(id) = app.active_view
-                && let Some(agent) = app.agents.get_mut(&id)
-            {
-                agent.active_modal = None;
+            if app.pending_editor.is_none() {
+                if let ActiveView::Agent(id) = app.active_view
+                    && let Some(agent) = app.agents.get_mut(&id)
+                {
+                    agent.active_modal = None;
+                }
+                app.pending_editor = Some(
+                    crate::app::external_editor::PendingEditorRequest::ConfigFile {
+                        path,
+                        refresh_agents_modal,
+                    },
+                );
             }
-            app.pending_editor_path = Some(path);
-            app.pending_agents_modal_refresh = refresh_agents_modal;
             vec![]
         }
+        Action::EditPromptExternal => super::external_editor::dispatch_edit_prompt_external(app),
         Action::OpenDashboard => dispatch_open_dashboard(app),
         Action::ExitDashboard => dispatch_exit_dashboard(app),
         Action::DashboardAttach(id) => dispatch_dashboard_attach(app, id),
@@ -1290,6 +1348,21 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
             });
             vec![]
         }
+        Action::ToggleWorkflows => {
+            let opening = matches!(app.active_view, ActiveView::Agent(id) if app.agents.get(&id).is_some_and(|agent| !agent.show_workflows));
+            if opening {
+                app.scroll_state.cancel_stream();
+                app.last_scroll_pos = None;
+            }
+            with_active_agent(app, |agent| {
+                agent.show_workflows = !agent.show_workflows;
+                if agent.show_workflows {
+                    agent.workflows_view.reset();
+                    agent.show_goal_detail = false;
+                }
+            });
+            vec![]
+        }
         Action::Rewind => dispatch_rewind(app),
         Action::RewindShowPicker => dispatch_rewind_show_picker(app),
         Action::RewindPickerSelect(prompt_index) => {
@@ -1333,22 +1406,24 @@ pub(super) fn dispatch_action_result(
         }
         Ok(outcome) => match outcome.status {
             OutcomeStatus::Success => {
-                if !outcome.message.trim().is_empty()
-                    && let Some(ref mut modal) = agent.extensions_modal
-                    && modal.result_notice.is_none()
-                {
-                    let entry_index = match modal.last_plugins_action {
-                        Some(xai_hooks_plugins_types::PluginsAction::Uninstall { .. }) => None,
-                        _ => modal.pending_entry_index,
-                    };
-                    modal.result_notice =
-                        Some(crate::views::extensions_modal::ActionResultNotice {
-                            message: outcome.message.clone(),
-                            entry_index,
-                            ticks_remaining: crate::views::extensions_modal::RESULT_NOTICE_TICKS,
-                        });
-                }
                 let mut effects = Vec::new();
+                if let Some(ref mut modal) = agent.extensions_modal {
+                    if !outcome.message.trim().is_empty() && modal.result_notice.is_none() {
+                        let entry_index = match modal.last_plugins_action {
+                            Some(xai_hooks_plugins_types::PluginsAction::Uninstall { .. }) => None,
+                            _ => modal.pending_entry_index,
+                        };
+                        modal.result_notice =
+                            Some(crate::views::extensions_modal::ActionResultNotice {
+                                message: outcome.message.clone(),
+                                entry_index,
+                                ticks_remaining:
+                                    crate::views::extensions_modal::RESULT_NOTICE_TICKS,
+                            });
+                    }
+                    modal.pending_action = None;
+                    modal.pending_entry_index = None;
+                }
                 if let Some(session_id) = agent.session.session_id.clone() {
                     if outcome.requires_reload {
                         effects.push(Effect::PluginsAction {
@@ -1356,7 +1431,7 @@ pub(super) fn dispatch_action_result(
                             session_id,
                             action: xai_hooks_plugins_types::PluginsAction::Reload,
                         });
-                    } else if agent.extensions_modal.is_some() {
+                    } else if let Some(modal) = agent.extensions_modal.as_mut() {
                         effects.push(Effect::FetchHooksList {
                             agent_id,
                             session_id: session_id.clone(),
@@ -1365,10 +1440,12 @@ pub(super) fn dispatch_action_result(
                             agent_id,
                             session_id: session_id.clone(),
                         });
-                        effects.push(Effect::FetchMarketplaceList {
+                        crate::app::dispatch::transcript::push_marketplace_fetch(
+                            modal,
+                            &mut effects,
                             agent_id,
-                            session_id: session_id.clone(),
-                        });
+                            session_id.clone(),
+                        );
                         effects.push(Effect::FetchMcpsList {
                             agent_id,
                             session_id,
@@ -1392,14 +1469,18 @@ pub(super) fn dispatch_action_result(
                         action
                     });
                     if let Some(action) = confirmed_action {
+                        let pending_entry_index = modal
+                            .pending_entry_index
+                            .or(Some(modal.picker_state.selected));
                         modal.modal_message =
                             Some(crate::views::extensions_modal::ModalMessage::Confirmation {
-                                message: format!(
-                                    "{} Press y to confirm, Esc to cancel.",
-                                    outcome.message
+                                message: outcome.message,
+                                action: crate::views::extensions_modal::ConfirmationAction::Plugins(
+                                    action,
                                 ),
-                                action,
+                                pending_entry_index,
                             });
+                        modal.picker_state.link_band = None;
                     } else {
                         modal.modal_message = Some(
                             crate::views::extensions_modal::ModalMessage::Error(outcome.message),
@@ -1413,6 +1494,8 @@ pub(super) fn dispatch_action_result(
             | OutcomeStatus::InternalError
             | OutcomeStatus::Unsupported => {
                 if let Some(ref mut modal) = agent.extensions_modal {
+                    modal.pending_action = None;
+                    modal.pending_entry_index = None;
                     modal.modal_message = Some(
                         crate::views::extensions_modal::ModalMessage::Error(outcome.message),
                     );

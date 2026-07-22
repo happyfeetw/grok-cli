@@ -56,22 +56,8 @@ async fn auto_wake_cancel_preserves_queued_user_prompt() {
         "is_background": true
     })
     .to_string();
-    content.enqueue_response(
-        "/v1/responses",
-        ScriptedResponse::sse(responses_api_tool_call_events(
-            "call_bg_wake",
-            "run_terminal_command",
-            &bg_args,
-        )),
-    );
-    content.enqueue_response(
-        "/v1/chat/completions",
-        ScriptedResponse::sse(chat_completions_tool_call_events_with_id(
-            "call_bg_wake",
-            "run_terminal_command",
-            &bg_args,
-        )),
-    );
+    let _background_turn =
+        expect_tool_turn(&content, "call_bg_wake", "run_terminal_command", bg_args);
     content.set_response("TURN1_SETTLED");
 
     let binary = pager_binary().expect("resolve pager binary");
@@ -122,42 +108,22 @@ async fn auto_wake_cancel_preserves_queued_user_prompt() {
     // consumed-completion sweep), then a foreground sleep that pins the turn
     // running while the user message and Ctrl+C land.
     let poll_args = json!({ "task_ids": [task_id.clone()] }).to_string();
-    content.enqueue_response(
-        "/v1/responses",
-        ScriptedResponse::sse(responses_api_tool_call_events(
-            "call_wake_poll",
-            "get_command_or_subagent_output",
-            &poll_args,
-        )),
-    );
-    content.enqueue_response(
-        "/v1/chat/completions",
-        ScriptedResponse::sse(chat_completions_tool_call_events_with_id(
-            "call_wake_poll",
-            "get_command_or_subagent_output",
-            &poll_args,
-        )),
+    let _poll_turn = expect_tool_turn(
+        &content,
+        "call_wake_poll",
+        "get_command_or_subagent_output",
+        poll_args,
     );
     let hold_args = json!({
         "command": format!("/bin/sleep {HOLD_SLEEP_SECS}"),
         "description": "hold turn"
     })
     .to_string();
-    content.enqueue_response(
-        "/v1/responses",
-        ScriptedResponse::sse(responses_api_tool_call_events(
-            "call_wake_hold",
-            "run_terminal_command",
-            &hold_args,
-        )),
-    );
-    content.enqueue_response(
-        "/v1/chat/completions",
-        ScriptedResponse::sse(chat_completions_tool_call_events_with_id(
-            "call_wake_hold",
-            "run_terminal_command",
-            &hold_args,
-        )),
+    let _hold_turn = expect_tool_turn(
+        &content,
+        "call_wake_hold",
+        "run_terminal_command",
+        hold_args,
     );
     // Fallback for every unscripted request after the queues drain (and the
     // response the surviving user prompt streams on the fixed path).
@@ -401,10 +367,13 @@ async fn cancel_before_task_completion_defers_auto_wake_until_user_prompt() {
     harness
         .wait_for_full_text("Task completed in", Duration::from_secs(15))
         .expect("background completion chip");
+    // hold must be strictly less than timeout: wait_until_stable stamps
+    // true_since after the deadline is fixed, so timeout == hold flakes under
+    // load even when the condition is always true (remote --runs_per_test).
     harness
         .wait_until_stable(
             "no auto-wake response after background completion",
-            Duration::from_secs(2),
+            Duration::from_secs(5),
             Duration::from_secs(2),
             |h| !h.contains_full_text(UNWANTED_AUTO_WAKE_SENTINEL),
         )
@@ -443,7 +412,7 @@ async fn cancel_before_task_completion_defers_auto_wake_until_user_prompt() {
     harness
         .wait_until_stable(
             "no second completion request after the user turn",
-            Duration::from_secs(2),
+            Duration::from_secs(5),
             Duration::from_secs(2),
             |_| {
                 content

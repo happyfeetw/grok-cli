@@ -1,5 +1,7 @@
 //! Session status, sharing, privacy, usage, and info dispatchers.
 
+use agent_client_protocol as acp;
+
 use super::ctx::get_active_agent;
 use super::settings::ui::refresh_open_settings_modals;
 use crate::app::actions::Effect;
@@ -132,22 +134,15 @@ pub(super) fn set_coding_data_sharing(app: &mut AppView, opted_in: bool) -> Vec<
             return vec![];
         }
     }
-    // ── Guard 3: an agent must exist to thread the ACP call through ──
+    // Synthetic AgentId(0) when no agents (welcome banner Accept).
     let agent_id = match app.active_view {
         crate::app::app_view::ActiveView::Agent(id) => id,
-        _ => match app.agents.keys().next().copied() {
-            Some(id) => id,
-            None => {
-                tracing::warn!(
-                    target: "settings",
-                    key = "coding_data_sharing",
-                    opted_in,
-                    "set_coding_data_sharing called with no agents — unreachable in \
-                     practice; returning empty (no toast: app.show_toast would no-op)",
-                );
-                return vec![];
-            }
-        },
+        _ => app
+            .agents
+            .keys()
+            .next()
+            .copied()
+            .unwrap_or(crate::app::agent::AgentId(0)),
     };
 
     let prev = !app.coding_data_retention_opt_out;
@@ -253,18 +248,60 @@ pub(super) fn dispatch_show_context_info(app: &mut AppView) -> Vec<Effect> {
     }]
 }
 
-/// Show credit usage: fetch billing data and display inline.
-///
-/// When the remote settings `grok_build_usage_redirect_url` flag is set (delivered via
-/// RemoteSettings, targeted at personal-team users), skip the backend fetch and
-/// just point the user at that URL instead. This is a kill switch for the
-/// personal-team billing path while it is unreliable.
+/// `/usage` — session token/cost, then consumer credits when visible.
+/// Credits are chained after the session block so layout stays ordered.
 pub(super) fn dispatch_show_usage(app: &mut AppView) -> Vec<Effect> {
     let ActiveView::Agent(id) = app.active_view else {
         return vec![];
     };
+    let session_id = {
+        let Some(agent) = app.agents.get_mut(&id) else {
+            return vec![];
+        };
+        agent.session.session_id.clone()
+    };
+    match session_id {
+        Some(session_id) => vec![Effect::FetchSessionUsage {
+            agent_id: id,
+            session_id,
+        }],
+        None => {
+            if let Some(agent) = app.agents.get_mut(&id) {
+                agent.scrollback.push_block(RenderBlock::system(
+                    "Session usage is unavailable until the session starts.".to_string(),
+                ));
+            }
+            append_consumer_billing_surface(app, id)
+        }
+    }
+}
+
+/// Commit a session-usage block if still on `session_id`, then consumer credits.
+pub(super) fn commit_session_usage_block(
+    app: &mut AppView,
+    agent_id: AgentId,
+    session_id: &acp::SessionId,
+    text: String,
+) -> Vec<Effect> {
+    let Some(agent) = app.agents.get_mut(&agent_id) else {
+        return vec![];
+    };
+    if agent.session.session_id.as_ref() != Some(session_id) {
+        return vec![];
+    }
+    agent.scrollback.push_block(RenderBlock::system(text));
+    append_consumer_billing_surface(app, agent_id)
+}
+
+/// Consumer credit follow-up for `/usage` (redirect or non-silent billing fetch).
+pub(super) fn append_consumer_billing_surface(app: &mut AppView, agent_id: AgentId) -> Vec<Effect> {
+    if !app.usage_visible {
+        return vec![];
+    }
+    // Remote-settings kill switch (`grok_build_usage_redirect_url`): link out
+    // instead of fetching billing from the backend.
     if let Some(url) = app.usage_billing_redirect_url.clone() {
-        if let Some(agent) = app.agents.get_mut(&id) {
+        if let Some(agent) = app.agents.get_mut(&agent_id) {
             agent.scrollback.push_block(RenderBlock::System(
                 crate::scrollback::blocks::SystemMessageBlock::new(format!(
                     "Please check your usage on {url}"
@@ -273,12 +310,26 @@ pub(super) fn dispatch_show_usage(app: &mut AppView) -> Vec<Effect> {
         }
         return vec![];
     }
-    // Non-silent fetch: the effect also pulls the auto top-up rule so the
-    // summary can render usage, prepaid credits, and auto top-up together.
+    if !app.agents.contains_key(&agent_id) {
+        return vec![];
+    }
+    // Non-silent: the effect also pulls the auto top-up rule so the summary
+    // renders usage, prepaid credits, and auto top-up together.
     vec![Effect::FetchBilling {
-        agent_id: id,
+        agent_id,
         silent: false,
     }]
+}
+
+/// `/usage manage` — open consumer billing. No-op when the surface is hidden.
+pub(super) fn dispatch_manage_billing(app: &mut AppView) -> Vec<Effect> {
+    if !app.usage_visible {
+        return vec![];
+    }
+    super::router::dispatch(
+        crate::app::actions::Action::OpenUrl("https://grok.com/?_s=usage".to_string()),
+        app,
+    )
 }
 
 /// Commit a one-line "update available" notice into the active agent's
@@ -380,14 +431,13 @@ pub(super) fn handle_coding_data_sharing_updated(
     agent_id: AgentId,
     opted_in: bool,
 ) -> Vec<Effect> {
-    // Re-anchor mirror to server-confirmed value (defense-in-
-    // depth against server reshaping the boolean). `agent_id`
-    // discarded — privacy is app-level, not per-agent.
+    // Re-anchor mirror to server-confirmed value (defense-in-depth against
+    // server reshaping the boolean). `agent_id` discarded — privacy is
+    // app-level, not per-agent.
     set_coding_data_sharing_inner(app, opted_in);
     refresh_open_settings_modals(app);
-    // Re-toast on confirmation. Without this, a slow ACP
-    // round-trip would leave the user with only the
-    // optimistic toast (already faded) and no
+    // Re-toast on confirmation. Without this, a slow ACP round-trip would
+    // leave the user with only the optimistic toast (already faded) and no
     // server-confirmed feedback.
     app.show_toast(&coding_data_sharing_toast(opted_in));
     tracing::info!(
@@ -397,7 +447,15 @@ pub(super) fn handle_coding_data_sharing_updated(
         opted_in,
         "ACP update confirmed; mirror re-anchored",
     );
-    vec![]
+    let mut effects = vec![];
+    // Ack only after successful opt-in from the privacy banner Accept path.
+    if app.privacy_banner_accept_inflight {
+        app.privacy_banner_accept_inflight = false;
+        if opted_in {
+            effects.extend(ack_privacy_banner(app));
+        }
+    }
+    effects
 }
 
 pub(super) fn handle_coding_data_sharing_failed(
@@ -406,9 +464,8 @@ pub(super) fn handle_coding_data_sharing_failed(
     error: String,
     rollback_to_opted_in: bool,
 ) -> Vec<Effect> {
-    // Revert optimistic mutation: inner → refresh → toast.
-    //
-    // `agent_id` discarded — privacy is global.
+    // Revert optimistic mutation: inner → refresh → toast. `agent_id`
+    // discarded — privacy is global.
     set_coding_data_sharing_inner(app, rollback_to_opted_in);
     refresh_open_settings_modals(app);
     // Scrub long/unsafe error strings before toasting.
@@ -424,7 +481,44 @@ pub(super) fn handle_coding_data_sharing_failed(
         %error,
         "ACP update failed; reverted optimistic mutation",
     );
+    // Accept failure: no ack; clear inflight so the banner stays.
+    app.privacy_banner_accept_inflight = false;
     vec![]
+}
+
+/// Stamp `[privacy].privacy_banner_acked` (in-memory + disk).
+pub(in crate::app::dispatch) fn ack_privacy_banner(app: &mut AppView) -> Vec<Effect> {
+    let acked_at = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    app.privacy_banner_acked = Some(acked_at.clone());
+    vec![Effect::PersistPrivacyBannerAcked { acked_at }]
+}
+
+/// Accept: opt-in via settings path; ack only after ACP success.
+pub(in crate::app::dispatch) fn dispatch_privacy_banner_accept(app: &mut AppView) -> Vec<Effect> {
+    if app.privacy_banner_accept_inflight || !app.privacy_banner_should_show() {
+        return vec![];
+    }
+    let effects = set_coding_data_sharing(app, true);
+    // should_show guarantees opted-out + unguarded, so effects is only empty
+    // if a guard regresses; leaving inflight false keeps Accept clickable.
+    app.privacy_banner_accept_inflight = !effects.is_empty();
+    effects
+}
+
+/// Customize: ack, then open settings on coding_data_sharing
+/// (creates/switches agent when opened from welcome).
+pub(in crate::app::dispatch) fn dispatch_privacy_banner_customize(
+    app: &mut AppView,
+) -> Vec<Effect> {
+    if app.privacy_banner_accept_inflight || !app.privacy_banner_should_show() {
+        return vec![];
+    }
+    let mut effects = ack_privacy_banner(app);
+    effects.extend(super::settings::ui::dispatch_open_settings(
+        app,
+        Some("coding_data_sharing"),
+    ));
+    effects
 }
 
 pub(super) fn handle_context_info_complete(
@@ -475,8 +569,8 @@ pub(super) fn dispatch_copy_session_id(app: &mut AppView, index: usize) -> Vec<E
                 .map(|e| e.id.clone())
         });
     if let Some(id) = id {
-        let r = crate::clipboard::copy_text(&id);
-        app.show_toast(r.message);
+        let delivery = crate::clipboard::copy_text_or_file(&id);
+        app.show_toast(delivery.toast_message().as_ref());
     }
     vec![]
 }

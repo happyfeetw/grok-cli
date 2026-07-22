@@ -510,9 +510,7 @@ mod link_click_tests {
             &bundle,
             false,
             &mut Vec::new(),
-            false,
-            false,
-            None,
+            crate::app::agent_view::AppRenderParams::default(),
         );
         buf
     }
@@ -697,6 +695,24 @@ mod link_click_tests {
         assert!(
             !matches!(outcome, InputOutcome::Action(Action::DemoteToBackground)),
             "click where the bg button used to be must not demote under a dropdown"
+        );
+    }
+    #[test]
+    fn subagent_view_suppresses_background_button() {
+        let reg = ActionRegistry::defaults();
+        let mut parent = make_agent();
+        let mut child = make_agent();
+        super::test_fixtures::add_running_execute(&mut child);
+        parent
+            .subagent_views
+            .insert("child-sid".into(), Box::new(child));
+        assert!(!parent.subagent_views["child-sid"].is_subagent_view);
+        parent.open_subagent_fullscreen("child-sid".into());
+        let child = parent.subagent_views.get_mut("child-sid").unwrap();
+        draw_banner_frame(child, &reg, &[], 0);
+        assert!(
+            child.hit_bg_button.rect.is_none(),
+            "read-only child view must not advertise a background button"
         );
     }
     /// Header twin: the top-header upgrade CTA rect must drop under an open
@@ -2111,9 +2127,7 @@ mod link_click_tests {
             &bundle,
             false,
             &mut Vec::new(),
-            false,
-            false,
-            None,
+            crate::app::agent_view::AppRenderParams::default(),
         );
         buf
     }
@@ -2214,9 +2228,7 @@ mod link_click_tests {
             &bundle,
             false,
             &mut Vec::new(),
-            false,
-            false,
-            None,
+            crate::app::agent_view::AppRenderParams::default(),
         );
         let tip_y = (0..tall.height)
             .find(|&y| buffer_row(&buf, tall.width, y).contains("Queued"))
@@ -2290,9 +2302,7 @@ mod link_click_tests {
             &bundle,
             false,
             &mut Vec::new(),
-            false,
-            false,
-            None,
+            crate::app::agent_view::AppRenderParams::default(),
         );
         let frame: String = (0..tall.height)
             .map(|y| buffer_row(&buf, tall.width, y))

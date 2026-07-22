@@ -66,10 +66,12 @@ pub fn fork_session_params(
     let parent_cwd_str = parent_cwd.to_string_lossy().into_owned();
     let source_cwd = xai_grok_shell::session::resolve_local_session_any_cwd(parent_session_id)
         .unwrap_or_else(|| parent_cwd_str.clone());
-    let mut payload = serde_json::json!(
-        { "sourceSessionId" : parent_session_id, "sourceCwd" : source_cwd, "newCwd" :
-        parent_cwd_str.clone(), "sessionKind" : "fork", }
-    );
+    let mut payload = serde_json::json!({
+        "sourceSessionId": parent_session_id,
+        "sourceCwd": source_cwd,
+        "newCwd": parent_cwd_str.clone(),
+        "sessionKind": "fork",
+    });
     if let Some(nid) = new_session_id {
         payload["newSessionId"] = serde_json::Value::String(nid.to_string());
     }
@@ -381,10 +383,14 @@ pub struct MaterializeCtx {
     pub chat_mode: bool,
 }
 impl MaterializeCtx {
+    /// `--resume` miss bails fast.
+    pub const fn default_allow_remote_restore() -> bool {
+        false
+    }
     pub fn from_pager_args(args: &PagerArgs) -> Self {
         Self {
             has_worktree: args.worktree.is_some(),
-            allow_remote_restore: false,
+            allow_remote_restore: Self::default_allow_remote_restore(),
             chat_mode: args.chat(),
         }
     }
@@ -568,9 +574,7 @@ async fn resolve_existing_session(
     cwd: &str,
 ) -> anyhow::Result<ResolvedExisting> {
     if let Some(local_id) = xai_grok_shell::session::resolve_local_session(session_id, cwd) {
-        tracing::info!(
-            session_id = % session_id, local_id = % local_id, "Session found locally"
-        );
+        tracing::info!(session_id = %session_id, local_id = %local_id, "Session found locally");
         return Ok(ResolvedExisting {
             id: local_id,
             original_cwd: None,
@@ -579,7 +583,8 @@ async fn resolve_existing_session(
     }
     if let Some(original_cwd) = xai_grok_shell::session::resolve_local_session_any_cwd(session_id) {
         tracing::info!(
-            session_id = % session_id, original_cwd = % original_cwd,
+            session_id = %session_id,
+            original_cwd = %original_cwd,
             "Session found locally under different CWD"
         );
         eprintln!(
@@ -594,7 +599,7 @@ async fn resolve_existing_session(
     }
     if ctx.has_worktree {
         tracing::info!(
-            session_id = % session_id,
+            session_id = %session_id,
             "Session not found locally; deferring restore to worktree resume handler"
         );
         eprintln!(
@@ -610,12 +615,20 @@ async fn resolve_existing_session(
     if !ctx.allow_remote_restore {
         anyhow::bail!("Session does not exist");
     }
+    let raw_config = xai_grok_shell::config::load_effective_config()
+        .map_err(|e| anyhow::anyhow!("Failed to load config: {}", e))?;
+    if let Some((false, source)) =
+        xai_grok_shell::util::config::session_registry_local_override_sourced(Some(&raw_config))
+    {
+        anyhow::bail!(
+            "Session does not exist locally (session registry is disabled by {})",
+            source.label()
+        );
+    }
     eprintln!(
         "Session {} not found locally, restoring from remote...",
         session_id
     );
-    let raw_config = xai_grok_shell::config::load_effective_config()
-        .map_err(|e| anyhow::anyhow!("Failed to load config: {}", e))?;
     let agent_config = xai_grok_shell::agent::config::Config::new_from_toml_cfg(&raw_config)
         .map_err(|e| anyhow::anyhow!("Failed to create agent config: {}", e))?;
     use xai_grok_shell::agent::session_registry_client::SessionRegistryClient;
@@ -907,6 +920,14 @@ mod tests {
     #[test]
     fn materialize_ctx_chat_mode_from_args() {
         assert!(!MaterializeCtx::from_pager_args(&parse(&["grok"])).chat_mode);
+    }
+    /// hardcoded `false` here once disabled it everywhere.
+    #[test]
+    fn remote_restore_follows_compiled_restore_stack() {
+        assert_eq!(
+            MaterializeCtx::from_pager_args(&parse(&["grok"])).allow_remote_restore,
+            false
+        );
     }
     /// Explicit-id resume under `--chat` passes the id through untouched:
     /// no disk resolution, no GCS restore (the cwd does not even exist).

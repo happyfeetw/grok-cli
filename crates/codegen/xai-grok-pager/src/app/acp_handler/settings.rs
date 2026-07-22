@@ -115,14 +115,21 @@ pub(super) fn handle_settings_update(notif: &acp::ExtNotification, app: &mut App
             agent.set_sharing_enabled(v);
         }
     }
+    if let Some(v) = update.privacy_notice_rollout {
+        app.privacy_notice_rollout = v;
+    }
+    if let Some(v) = update.privacy_banner_reshow_days {
+        app.privacy_banner_reshow_days = Some(v);
+    }
     // Tier before voice: same payload may set "API Key" and voice_mode_enabled=false.
     // Always recompute is_api_key_auth from the tier so a later Free/SuperGrok
-    // stamp does not leave API-key bypass / hidden `/usage` stuck.
+    // stamp does not leave API-key bypass / a hidden billing surface stuck.
     if let Some(v) = update.subscription_tier_display {
         let was_api_key = app.is_api_key_auth;
         let is_key = super::super::app_view::is_api_key_label(&v);
         app.is_api_key_auth = is_key;
         app.usage_visible = !is_key && app.team_name.is_none();
+        app.sync_billing_surface_to_agents();
         app.subscription_tier = Some(v);
         app.apply_tier_restrictions();
         // Leaving API Key → free/X Basic without a voice field: drop force-on.
@@ -473,6 +480,10 @@ pub(super) struct PagerSettingsUpdate {
     show_resolved_model: Option<bool>,
     #[serde(default)]
     sharing_enabled: Option<bool>,
+    #[serde(default)]
+    privacy_notice_rollout: Option<bool>,
+    #[serde(default)]
+    privacy_banner_reshow_days: Option<u64>,
     #[serde(default)]
     voice_mode_enabled: Option<bool>,
     #[serde(default)]

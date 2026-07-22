@@ -14,6 +14,18 @@ packaging, branding, and distribution.
 
 ## [Unreleased]
 
+## [0.2.110-1] - 2026-07-23
+
+### Changed
+
+- Merged upstream `xai-org/grok-build` (four monorepo sync commits
+  `ba76b0a`…`a5727c5`; `SOURCE_REV` `30192d2…`, shipping base ~0.2.110).
+  Highlights: worktree auto-GC, `/usage`, Doctor improvements, session
+  relocation, ACP session state/import, security gates (bash/kubectl/rg),
+  coding-data sharing upsell banner, toolOverrides, dynamic workflows default
+  on, Esc cancels turn. Kept fork product naming (`grok-cli`,
+  `@spikewang/grok-cli`, system-proxy) and SemVer `BASE-N` packaging.
+
 ## [0.2.105-1] - 2026-07-19
 
 ### Changed

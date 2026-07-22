@@ -1,5 +1,88 @@
 # Changelog
 
+# 0.2.110 — 2026-07-21
+
+## Features
+
+- **Removing MCP servers, plugins, or hook sources** in the Extensions modal now asks for confirmation (press y to proceed).
+
+## Bug Fixes
+
+- **Session creation failures** (including disk full) now show an error message instead of hanging on "Starting session…".
+- **Auto-compact** that fails due to an expired token now lets you log in and automatically retry the compact + original prompt.
+
+
+# 0.2.109 — 2026-07-21
+
+## Features
+
+- **/usage** now shows token counts and cost for the current session.
+- **grok doctor fix ssh-wrap** can set up `grok wrap ssh` automatically for Bash, zsh, and fish.
+- **[model_providers.<id>]** lets operators share gateway settings across custom models.
+- **Reasoning effort** now accepts `max` as its own tier (above `xhigh`) when the model advertises it.
+- **Queued follow-ups** can now be batched into a single model turn with the new combine_queued_prompts setting.
+- **/doctor** is now the main in-app command for checking terminal, tmux, clipboard, and keyboard setup.
+- **read_file** now returns full Markdown files inside skills/ directories without truncation.
+
+## Bug Fixes
+
+- **Voice dictation** now explains when the microphone delivered only silence (macOS permission) versus no speech detected.
+- **Duplicate 'Worked for' markers** no longer stack in the transcript when background tasks defer during a parked turn.
+- The idle status row now clearly says '1 subagent still running' instead of 'watching · 1 subagent' when background work remains.
+- **Background /loop** iterations no longer overlap when descendant subagents are still running.
+
+
+# 0.2.108 — 2026-07-21
+
+## Features
+
+- **Sessions** can now be resumed after moving the working directory or switching machines.
+- **Ctrl+G** in minimal mode opens the current prompt draft in an external editor without sending it; fullscreen keeps the tasks pane.
+- **grok doctor** checks terminal, tmux, clipboard, and keyboard setup without opening the TUI.
+
+## Bug Fixes
+
+- **Image paste** over grok wrap now works on headless remotes.
+
+# 0.2.107 — 2026-07-20
+
+## Features
+
+- **Stop hooks** can now keep the agent running by feeding feedback back to the model instead of ending the turn.
+- **Custom models** can now authenticate using rotating tokens fetched from a command, similar to credential helpers.
+- **Feedback** now includes author details when provided, helping with follow-up.
+- **Sessions** can now resume across hosts by mirroring transcripts to external storage like S3.
+- **Sessions** can now be imported and resumed from mirrored state across hosts.
+- **Auto mode** now continues after classifier blocks by telling the agent the reason, escalating only after repeated denials.
+- **Session storage** can now flush after every frame (eager mode) instead of only at turn end.
+
+## Bug Fixes
+
+- **Ctrl+B** now backgrounds running commands; **Ctrl+G** toggles the tasks pane.
+- **OAuth popups** in live preview now redirect correctly after login.
+- **Git status** shown to the model at startup now includes unstaged and untracked files.
+- **Tool descriptions** now stay correct when parameter names are randomized.
+- **Minimal mode** now shows full reasoning in scrollback and collapses successful lookup results to one-line headers.
+- **Empty commands** like `true` or bare `echo` now remind the model to stop and wait for background work instead of spinning.
+
+## Performance
+
+- **Recap summaries** after idle now load much faster by reusing the previous turn's cached context.
+
+
+# 0.2.106 — 2026-07-18
+
+## Features
+
+- **Added GROK_CLIPBOARD_NO_OSC52** env var to stop clipboard sequences from appearing as garbage in unsupported terminals.
+- **Scheduled tasks** can now be updated in place; one-time tasks are retired in favor of background commands.
+
+## Bug Fixes
+
+- **Copies** now always write a backup file so text remains recoverable when the terminal clipboard fails.
+- **Syntax highlighting** in --minimal mode is now visible on light terminals.
+
+
 # 0.2.105 — 2026-07-18
 
 ## Features
