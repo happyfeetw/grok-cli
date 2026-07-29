@@ -1,0 +1,358 @@
+name: Sync upstream
+
+on:
+  # GitHub cron uses UTC. 19:17 UTC is 03:17 the next day in Asia/Shanghai.
+  schedule:
+    - cron: "17 19 * * *"
+  workflow_dispatch:
+  push:
+    branches:
+      - "automation/upstream-sync-*"
+
+permissions:
+  actions: write
+  contents: write
+  issues: write
+
+concurrency:
+  group: upstream-sync
+  cancel-in-progress: false
+
+env:
+  UPSTREAM_URL: https://github.com/xai-org/grok-build.git
+
+jobs:
+  prepare:
+    name: Merge and finalize metadata
+    runs-on: ubuntu-22.04
+    outputs:
+      status: ${{ steps.sync.outputs.status }}
+      branch: ${{ steps.sync.outputs.branch }}
+      upstream_sha: ${{ steps.sync.outputs.upstream_sha }}
+      version: ${{ steps.sync.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Fetch upstream once and prepare candidate
+        id: sync
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          EVENT_NAME: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote add upstream "$UPSTREAM_URL" 2>/dev/null || \
+            git remote set-url upstream "$UPSTREAM_URL"
+          git fetch --no-tags upstream main
+          gh label create upstream-sync \
+            --color "1D76DB" \
+            --description "Automated upstream synchronization" \
+            --force
+          gh label create needs-codex \
+            --color "D93F0B" \
+            --description "Requires local Codex conflict resolution" \
+            --force
+
+          if [[ "$EVENT_NAME" == "push" ]]; then
+            BRANCH="$REF_NAME"
+            UPSTREAM_SHA="${BRANCH#automation/upstream-sync-}"
+            if [[ ! "$UPSTREAM_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+              echo "::error::automation branch must end with a full 40-character upstream SHA"
+              exit 1
+            fi
+            git cat-file -e "${UPSTREAM_SHA}^{commit}"
+            git switch -C "$BRANCH" "$GITHUB_SHA"
+            git merge-base --is-ancestor "$UPSTREAM_SHA" HEAD || {
+              echo "::error::pinned upstream commit is not an ancestor of the candidate"
+              exit 1
+            }
+            read -r -a PARENTS <<<"$(git rev-list --parents -n 1 HEAD)"
+            if [[ "${#PARENTS[@]}" -ne 3 || "${PARENTS[2]}" != "$UPSTREAM_SHA" ]]; then
+              echo "::error::local Codex branch must contain one merge commit at HEAD with pinned upstream as parent 2"
+              exit 1
+            fi
+          else
+            UPSTREAM_SHA="$(git rev-parse upstream/main)"
+            BRANCH="automation/upstream-sync-${UPSTREAM_SHA}"
+
+            if git merge-base --is-ancestor "$UPSTREAM_SHA" HEAD; then
+              echo "status=up_to_date" >> "$GITHUB_OUTPUT"
+              echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
+              echo "upstream_sha=$UPSTREAM_SHA" >> "$GITHUB_OUTPUT"
+              echo "version=" >> "$GITHUB_OUTPUT"
+              echo "Already contains upstream ${UPSTREAM_SHA}"
+              exit 0
+            fi
+
+            if git ls-remote --exit-code --heads origin "$BRANCH" >/dev/null 2>&1; then
+              git fetch origin "$BRANCH:refs/remotes/origin/$BRANCH"
+              git switch -C "$BRANCH" "refs/remotes/origin/$BRANCH"
+              git merge-base --is-ancestor "$UPSTREAM_SHA" HEAD || {
+                echo "::error::existing automation branch does not contain its pinned upstream commit"
+                exit 1
+              }
+              if ! git merge-base --is-ancestor origin/main HEAD; then
+                git merge --no-edit origin/main || {
+                  echo "::error::existing candidate no longer contains current main and could not be refreshed cleanly"
+                  exit 1
+                }
+              fi
+            else
+              git switch -c "$BRANCH"
+              set +e
+              packaging/scripts/merge-upstream.sh \
+                --merge-only --no-fetch --ref "$UPSTREAM_SHA"
+              MERGE_RC=$?
+              set -e
+
+              if [[ "$MERGE_RC" -eq 10 ]]; then
+                CONFLICTS="$(git diff --name-only --diff-filter=U)"
+                {
+                  echo "repository=$REPOSITORY"
+                  echo "base_sha=$(git rev-parse ORIG_HEAD)"
+                  echo "upstream_sha=$UPSTREAM_SHA"
+                  echo "workflow=$RUN_URL"
+                  echo "conflicts:"
+                  printf '%s\n' "$CONFLICTS"
+                } > upstream-sync-conflict.txt
+
+                ISSUE_NUMBER="$(
+                  gh issue list \
+                    --state open \
+                    --label upstream-sync \
+                    --search "${UPSTREAM_SHA} in:title" \
+                    --json number \
+                    --jq '.[0].number // empty'
+                )"
+                if [[ -z "$ISSUE_NUMBER" ]]; then
+                  {
+                    echo "GitHub's hosted runner found merge conflicts."
+                    echo
+                    echo "- Base: \`$(git rev-parse ORIG_HEAD)\`"
+                    echo "- Upstream: \`${UPSTREAM_SHA}\`"
+                    echo "- Workflow: ${RUN_URL}"
+                    echo
+                    echo "Unresolved files:"
+                    echo '```text'
+                    printf '%s\n' "$CONFLICTS"
+                    echo '```'
+                    echo
+                    echo "The local Codex scheduled task should resolve this pinned merge."
+                    echo "It must not run Cargo or build locally."
+                  } > upstream-sync-issue.md
+                  gh issue create \
+                    --title "[upstream-sync] conflict at ${UPSTREAM_SHA}" \
+                    --label upstream-sync \
+                    --label needs-codex \
+                    --body-file upstream-sync-issue.md
+                else
+                  gh issue comment "$ISSUE_NUMBER" \
+                    --body "Conflict reproduced by ${RUN_URL}. Upstream remains pinned to \`${UPSTREAM_SHA}\`."
+                fi
+
+                echo "status=conflict" >> "$GITHUB_OUTPUT"
+                echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
+                echo "upstream_sha=$UPSTREAM_SHA" >> "$GITHUB_OUTPUT"
+                echo "version=" >> "$GITHUB_OUTPUT"
+                exit 0
+              elif [[ "$MERGE_RC" -ne 0 ]]; then
+                echo "::error::merge script failed with exit ${MERGE_RC}"
+                exit "$MERGE_RC"
+              fi
+            fi
+          fi
+
+          packaging/scripts/merge-upstream.sh \
+            --finalize-only --no-fetch --ref "$UPSTREAM_SHA"
+          node packaging/scripts/prepare-upstream-changelog.js \
+            --upstream-sha "$UPSTREAM_SHA"
+
+          git add -A
+          if ! git diff --cached --quiet; then
+            git commit -m "chore: finalize upstream ${UPSTREAM_SHA:0:12}"
+          fi
+          git push --set-upstream origin "$BRANCH"
+
+          VERSION="$(tr -d '[:space:]' < packaging/VERSION)"
+          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+-[1-9][0-9]*$ ]]; then
+            echo "::error::unexpected fork version: ${VERSION}"
+            exit 1
+          fi
+          echo "status=ready" >> "$GITHUB_OUTPUT"
+          echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
+          echo "upstream_sha=$UPSTREAM_SHA" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Upload conflict evidence
+        if: steps.sync.outputs.status == 'conflict'
+        uses: actions/upload-artifact@v4
+        with:
+          name: upstream-sync-conflict-${{ steps.sync.outputs.upstream_sha }}
+          path: |
+            upstream-sync-conflict.txt
+            upstream-sync-issue.md
+          if-no-files-found: warn
+          retention-days: 30
+
+  policy:
+    name: Linux policy and Cargo check
+    needs: prepare
+    if: needs.prepare.outputs.status == 'ready'
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.branch }}
+          fetch-depth: 0
+
+      - name: Fetch pinned upstream
+        run: |
+          set -euo pipefail
+          git remote add upstream "$UPSTREAM_URL" 2>/dev/null || \
+            git remote set-url upstream "$UPSTREAM_URL"
+          git fetch --no-tags upstream main
+          test "$(git rev-parse '${{ needs.prepare.outputs.upstream_sha }}^{commit}')" = \
+            "${{ needs.prepare.outputs.upstream_sha }}"
+
+      - uses: arduino/setup-protoc@v3
+        with:
+          version: "29.3"
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Resolve Rust toolchain
+        id: rust-toolchain
+        run: |
+          set -euo pipefail
+          CHANNEL="$(sed -n 's/^channel = "\([^"]*\)"/\1/p' rust-toolchain.toml | head -1)"
+          test -n "$CHANNEL"
+          echo "channel=$CHANNEL" >> "$GITHUB_OUTPUT"
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.rust-toolchain.outputs.channel }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: upstream-sync-linux
+
+      - name: Verify policy and compile
+        run: |
+          set -euo pipefail
+          packaging/scripts/verify-upstream-policy.sh \
+            --no-fetch --ref "${{ needs.prepare.outputs.upstream_sha }}"
+          cargo check -p xai-grok-pager-bin --locked
+
+  build-macos:
+    name: Build darwin-${{ matrix.arch }}
+    needs: prepare
+    if: needs.prepare.outputs.status == 'ready'
+    runs-on: macos-14
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            arch: arm64
+          - target: x86_64-apple-darwin
+            arch: x64
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.branch }}
+
+      - uses: arduino/setup-protoc@v3
+        with:
+          version: "29.3"
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Point PROTOC at a real binary
+        run: echo "PROTOC=$(command -v protoc)" >> "$GITHUB_ENV"
+
+      - name: Resolve Rust toolchain
+        id: rust-toolchain
+        run: |
+          set -euo pipefail
+          CHANNEL="$(sed -n 's/^channel = "\([^"]*\)"/\1/p' rust-toolchain.toml | head -1)"
+          test -n "$CHANNEL"
+          echo "channel=$CHANNEL" >> "$GITHUB_OUTPUT"
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.rust-toolchain.outputs.channel }}
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: upstream-sync-macos-${{ matrix.target }}
+
+      - name: Build release candidate
+        env:
+          GROK_VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          cargo build \
+            -p xai-grok-pager-bin \
+            --release \
+            --locked \
+            --target "${{ matrix.target }}"
+          test -f "target/${{ matrix.target }}/release/xai-grok-pager"
+
+  promote:
+    name: Fast-forward main and start release
+    needs: [prepare, policy, build-macos]
+    if: needs.prepare.outputs.status == 'ready'
+    runs-on: ubuntu-22.04
+    env:
+      GH_TOKEN: ${{ github.token }}
+      BRANCH: ${{ needs.prepare.outputs.branch }}
+      UPSTREAM_SHA: ${{ needs.prepare.outputs.upstream_sha }}
+      VERSION: ${{ needs.prepare.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Promote the validated candidate
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          git fetch origin "$BRANCH:refs/remotes/origin/$BRANCH"
+          CANDIDATE="refs/remotes/origin/$BRANCH"
+
+          git merge-base --is-ancestor origin/main "$CANDIDATE" || {
+            echo "::error::main advanced outside the candidate; refusing non-fast-forward promotion"
+            exit 1
+          }
+          git merge-base --is-ancestor "$UPSTREAM_SHA" "$CANDIDATE" || {
+            echo "::error::candidate lost the pinned upstream commit"
+            exit 1
+          }
+          test "$(tr -d '[:space:]' < <(git show "${CANDIDATE}:packaging/VERSION"))" = "$VERSION"
+
+          git push origin "${CANDIDATE}:refs/heads/main"
+          git push origin --delete "$BRANCH" || \
+            echo "::warning::main was promoted, but candidate branch cleanup failed"
+
+          gh workflow run release-macos.yml \
+            --ref main \
+            -f "tag=v${VERSION}"
+
+          ISSUE_NUMBER="$(
+            gh issue list \
+              --state open \
+              --label upstream-sync \
+              --search "${UPSTREAM_SHA} in:title" \
+              --json number \
+              --jq '.[0].number // empty'
+          )"
+          if [[ -n "$ISSUE_NUMBER" ]]; then
+            gh issue close "$ISSUE_NUMBER" \
+              --comment "Resolved, promoted to \`main\`, and release dispatch accepted by ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}."
+          fi

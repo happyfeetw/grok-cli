@@ -16,8 +16,8 @@ When merging [`xai-org/grok-build`](https://github.com/xai-org/grok-build):
 
 - **Do not** run `cargo generate-lockfile` or unconstrained `cargo update`
   (third-party drift / MSRV failures on pinned rustc).
-- Prefer: `packaging/scripts/merge-upstream.sh` then
-  `packaging/scripts/verify-upstream-policy.sh`.
+- Prefer the scheduled GitHub workflow. For a Git-only local merge, use
+  `merge-upstream.sh --merge-only`; finalization and builds stay on GitHub.
 - Full policy: [`docs/upstream-sync.md`](../docs/upstream-sync.md).
 
 ## Version management (upstream-compatible + SemVer 2.0)

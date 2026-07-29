@@ -16,8 +16,8 @@
 
 - **禁止** `cargo generate-lockfile` 或无 `-p` 的 `cargo update`（第三方漂移 /
   钉死 rustc 下 MSRV 失败）。
-- 推荐：`packaging/scripts/merge-upstream.sh`，再
-  `packaging/scripts/verify-upstream-policy.sh`。
+- 推荐使用 GitHub 定时工作流。本机只做 Git merge 时使用
+  `merge-upstream.sh --merge-only`；后处理和构建留在 GitHub。
 - 完整策略：[`docs/upstream-sync.zh-CN.md`](../docs/upstream-sync.zh-CN.md)。
 
 ## 版本管理（上游约定 + SemVer 2.0）

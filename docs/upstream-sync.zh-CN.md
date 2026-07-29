@@ -27,31 +27,59 @@
 
 ## 标准流程
 
+### 自动流程
+
+[Sync upstream 工作流](../.github/workflows/upstream-sync.yml)每天运行：
+
+1. GitHub 托管 runner 抓取一次 `upstream/main`，并固定完整 SHA。
+2. 用 `--merge-only --no-fetch` 做真实 merge；这个阶段不运行 Cargo。
+3. 无冲突时，由 GitHub 托管的 Linux / macOS runner 完成后处理、策略检查和
+   两种 macOS 架构构建。候选分支通过后快进到 `main`，再显式触发
+   `release-macos.yml`。
+4. 有冲突时，创建带 `upstream-sync` 和 `needs-codex` 标签的 Issue。本机
+   Codex 定时任务只在隔离 worktree 中解决 Git 冲突，并推送
+   `automation/upstream-sync-<完整SHA>`；后处理、构建、合入和发布仍由同一
+   GitHub 工作流完成。
+
+本机冲突任务不得运行 Cargo、构建或发布，不得直接改写 `main`，也不得
+force push。候选分支推送后先保留冲突 worktree；后续每次任务开始时，只有
+确认候选提交已进入 `origin/main`、Issue 已关闭且 worktree 干净，才删除这个
+精确 worktree。未完成现场继续保留；超过 7 天只告警，不自动强删。候选分支
+成功合入且 release dispatch（发布调度）被接受后，GitHub Actions 才关闭
+冲突 Issue。
+
+### 手工流程
+
 ```bash
-# 1) 工作区干净后，一键 merge + 恢复上游 lock
-packaging/scripts/merge-upstream.sh
+# 只做 merge；适合不希望本机产生 Rust 构建产物的情况。
+git fetch upstream main
+SHA="$(git rev-parse upstream/main)"
+packaging/scripts/merge-upstream.sh --merge-only --no-fetch --ref "$SHA"
 
-# 2) 处理剩余冲突（保留 grok-cli 品牌 / system-proxy）
-# 3) 更新 CHANGELOG 并 commit
-# 4) 打 tag 前做策略检查
-packaging/scripts/merge-upstream.sh --check-only
-# 或
-packaging/scripts/verify-upstream-policy.sh
+# 解决冲突并提交后，在构建 runner 上执行后处理。
+packaging/scripts/merge-upstream.sh --finalize-only --no-fetch --ref "$SHA"
 
-# 5) 用 packaging/VERSION（如 0.2.110-1）打 tag 发版
+# 打 tag 前验证策略。
+packaging/scripts/verify-upstream-policy.sh --no-fetch --ref "$SHA"
 ```
 
 脚本会：
 
-1. `git fetch upstream` 并 merge（可用 `--ref <sha>`）。
-2. **`git checkout <上游 tip> -- Cargo.lock`**，强制第三方与上游一致。
-3. 将 fork 发版号写成 **`{上游 shell 三段版本}-1`**（`packaging/VERSION` + `sync-version.js`）。
-4. **仅**执行：
+1. 独立手工运行时默认 fetch；自动流程传 `--no-fetch`，复用已经抓取并固定的
+   commit，避免同一 job 重复 fetch。
+2. `--merge-only` 只做 Git merge。冲突退出码为 `10`，且不会运行 Cargo 或
+   版本写入脚本。
+3. `--finalize-only` 要求固定的上游 commit 已是 `HEAD` 的祖先，然后对齐
+   release toolchain pin，并采用该 commit 的 `Cargo.lock`。
+4. 将 fork 发版号写成 **`{上游 shell 三段版本}-1`**（`packaging/VERSION` +
+   `sync-version.js`）。
+5. 后处理阶段 **仅**执行：
    ```bash
    cargo update -p xai-grok-pager -p xai-grok-pager-bin -p xai-grok-version
    ```
    只刷新 path 包在 lock 里的版本，不升级 crates.io。
-5. 校验第三方 lock 一致 + toolchain 双处 pin 一致。
+6. `--check-only` 校验第三方 lock、toolchain 双处 pin，以及固定的上游 commit
+   确实已经合入。
 
 若已在同一 base 上需要发 `-2`/`-3`：脚本默认写成 `-1` 后，自行改
 `packaging/VERSION`，再跑 `sync-version.js` 和上面的三条 `cargo update -p`。
@@ -68,7 +96,8 @@ packaging/scripts/verify-upstream-policy.sh
 
 ## 何时升级 Rust
 
-仅当 **上游** 提高 `rust-toolchain.toml`（或你接受 fork 长期更高 MSRV）。然后 **两处一起改**：
+仅当 **上游** 提高 `rust-toolchain.toml`（或你接受 fork 长期更高 MSRV）。
+自动后处理会对齐 release workflow 的 pin；手工修改时仍要 **两处一起改**：
 
 1. `rust-toolchain.toml` → `channel = "…"`
 2. `.github/workflows/release-macos.yml` → `toolchain: "…"`

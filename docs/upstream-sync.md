@@ -28,32 +28,61 @@ dependency / MSRV drift.
 
 ## Always do this
 
+### Automated path
+
+The [Sync upstream workflow](../.github/workflows/upstream-sync.yml) runs daily:
+
+1. A GitHub-hosted runner fetches `upstream/main` once and pins its full SHA.
+2. `--merge-only --no-fetch` performs a real merge without running Cargo.
+3. A clean merge is finalized and compiled on GitHub-hosted Linux and macOS
+   runners. The validated candidate is fast-forwarded to `main`, then
+   `release-macos.yml` is dispatched explicitly.
+4. A conflicted merge opens an `upstream-sync` + `needs-codex` Issue. The local
+   Codex scheduled task resolves only the Git conflict in an isolated worktree
+   and pushes `automation/upstream-sync-<full-sha>`. The same workflow performs
+   finalization, builds, promotion, and release.
+
+The local conflict task must not run Cargo, build, publish, rewrite `main`, or
+force-push. It keeps the conflict worktree after pushing the candidate. At the
+start of later runs, it removes that exact worktree only after the candidate is
+in `origin/main`, the Issue is closed, and the worktree is clean. Incomplete
+worktrees are retained; those older than seven days are reported but never
+force-removed automatically. GitHub Actions closes the conflict Issue only
+after promotion and successful release dispatch.
+
+### Manual path
+
 ```bash
-# 1) Clean tree, then automated merge + lock restore
-packaging/scripts/merge-upstream.sh
+# Merge only; safe for a machine where Rust artifacts are intentionally avoided.
+git fetch upstream main
+SHA="$(git rev-parse upstream/main)"
+packaging/scripts/merge-upstream.sh --merge-only --no-fetch --ref "$SHA"
 
-# 2) Fix remaining conflicts (keep grok-cli branding / system-proxy)
-# 3) CHANGELOG + commit
-# 4) Policy check before tag
-packaging/scripts/merge-upstream.sh --check-only
-# or
-packaging/scripts/verify-upstream-policy.sh
+# After resolving conflicts and committing, run finalization on a build runner.
+packaging/scripts/merge-upstream.sh --finalize-only --no-fetch --ref "$SHA"
 
-# 5) Tag BASE-N from packaging/VERSION (e.g. 0.2.110-1)
+# Verify policy before tagging BASE-N from packaging/VERSION.
+packaging/scripts/verify-upstream-policy.sh --no-fetch --ref "$SHA"
 ```
 
 What the script enforces:
 
-1. `git fetch upstream` and `git merge upstream/main` (or `--ref <sha>`).
-2. **`git checkout <upstream-tip> -- Cargo.lock`** so third-party pins match upstream.
-3. Stamps fork shipping version to **`{upstream_shell_version}-1`** via
+1. It fetches by default for standalone manual use. `--no-fetch` lets a
+   workflow reuse an already-fetched, pinned commit without a duplicate fetch.
+2. `--merge-only` performs only the Git merge. Conflict exit code `10` means no
+   Cargo or version-stamping command ran.
+3. `--finalize-only` requires the pinned upstream commit to be an ancestor of
+   `HEAD`, aligns the release toolchain pin, then checks out the pinned
+   upstream `Cargo.lock`.
+4. It stamps the fork shipping version to **`{upstream_shell_version}-1`** via
    `packaging/VERSION` + `sync-version.js`.
-4. Runs **only**:
+5. Finalization runs **only**:
    ```bash
    cargo update -p xai-grok-pager -p xai-grok-pager-bin -p xai-grok-version
    ```
    so path crate versions in the lock match packaging, without upgrading crates.io deps.
-5. Verifies third-party lock equality and toolchain pin match.
+6. `--check-only` verifies third-party lock equality, toolchain pin equality,
+   and that the pinned upstream commit is already merged.
 
 If packaging is already on the same base and you need `-2`, `-3`, edit
 `packaging/VERSION` after the script and re-run `node packaging/scripts/sync-version.js`
@@ -72,7 +101,8 @@ packaging/scripts/verify-upstream-policy.sh
 ## When to raise Rust (MSRV)
 
 Only when **upstream** raises `rust-toolchain.toml` (or you accept a permanent
-fork MSRV). Then change **both**:
+fork MSRV). Automated finalization aligns the release workflow pin. For a
+manual change, change **both**:
 
 1. `rust-toolchain.toml` → `channel = "…"`
 2. `.github/workflows/release-macos.yml` → `toolchain: "…"`

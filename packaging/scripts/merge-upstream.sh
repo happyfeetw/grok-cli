@@ -9,9 +9,16 @@
 #   4. Keep rust-toolchain.toml channel in lockstep with release CI.
 #
 # Usage:
-#   packaging/scripts/merge-upstream.sh              # merge upstream/main
-#   packaging/scripts/merge-upstream.sh --check-only # verify policy, no merge
-#   packaging/scripts/merge-upstream.sh --ref a5727c5
+#   packaging/scripts/merge-upstream.sh                    # merge + finalize
+#   packaging/scripts/merge-upstream.sh --merge-only       # merge, no Cargo work
+#   packaging/scripts/merge-upstream.sh --finalize-only    # restamp after merge
+#   packaging/scripts/merge-upstream.sh --check-only       # verify policy only
+#   packaging/scripts/merge-upstream.sh --no-fetch --ref <full-sha>
+#
+# Exit codes:
+#   0  success (including an already-merged upstream ref)
+#   2  invalid arguments
+#   10 merge conflicts remain; no Cargo command was run
 #
 set -euo pipefail
 
@@ -20,16 +27,27 @@ cd "$ROOT"
 
 UPSTREAM_REMOTE="${UPSTREAM_REMOTE:-upstream}"
 UPSTREAM_REF="${UPSTREAM_REF:-main}"
-CHECK_ONLY=0
-DO_MERGE=1
+MODE="full"
+FETCH_UPSTREAM=1
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --check-only) CHECK_ONLY=1; DO_MERGE=0; shift ;;
-    --ref) UPSTREAM_REF="$2"; shift 2 ;;
-    --remote) UPSTREAM_REMOTE="$2"; shift 2 ;;
+    --check-only) MODE="check"; shift ;;
+    --merge-only) MODE="merge"; shift ;;
+    --finalize-only) MODE="finalize"; shift ;;
+    --no-fetch) FETCH_UPSTREAM=0; shift ;;
+    --ref)
+      [[ $# -ge 2 ]] || { echo "error: --ref requires a value" >&2; exit 2; }
+      UPSTREAM_REF="$2"
+      shift 2
+      ;;
+    --remote)
+      [[ $# -ge 2 ]] || { echo "error: --remote requires a value" >&2; exit 2; }
+      UPSTREAM_REMOTE="$2"
+      shift 2
+      ;;
     -h|--help)
-      sed -n '2,20p' "$0"
+      sed -n '2,25p' "$0"
       exit 0
       ;;
     *)
@@ -63,6 +81,31 @@ verify_toolchain_pin() {
 Bump both together when following upstream; do not leave CI on a different pin."
   fi
   info "toolchain pin OK: $tt (rust-toolchain.toml + release CI)"
+}
+
+align_release_workflow_toolchain() {
+  local channel
+  channel="$(toolchain_channel)"
+  [[ -n "$channel" ]] || die "could not read channel from rust-toolchain.toml"
+  python3 - "$channel" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+channel = sys.argv[1]
+path = Path(".github/workflows/release-macos.yml")
+before = path.read_text()
+after, count = re.subn(
+    r'(?m)^(\s*toolchain:\s*)"[^"]+"(\s*)$',
+    rf'\g<1>"{channel}"\g<2>',
+    before,
+)
+if count == 0:
+    print("error: release-macos.yml has no explicit toolchain pin", file=sys.stderr)
+    sys.exit(1)
+path.write_text(after)
+print(f"→ release workflow toolchain aligned to {channel} ({count} occurrence)")
+PY
 }
 
 # Compare third-party package versions (registry/git) between two lockfiles.
@@ -192,49 +235,53 @@ restore_upstream_lock_and_restamp() {
   stamp_shipping_to_fork_version "$fork_ver"
 }
 
-# --- checks that always run ---
-verify_toolchain_pin
-
-if ! git remote get-url "$UPSTREAM_REMOTE" >/dev/null 2>&1; then
-  die "remote '${UPSTREAM_REMOTE}' not configured (expected xai-org/grok-build)"
+# --- checks that run before fetching / resolving the upstream ref ---
+# Finalization may follow an upstream toolchain bump. It aligns release CI
+# deterministically before verifying the shared pin.
+if [[ "$MODE" != "finalize" ]]; then
+  verify_toolchain_pin
 fi
 
-info "fetch ${UPSTREAM_REMOTE}"
-git fetch "$UPSTREAM_REMOTE" --tags
+if [[ "$FETCH_UPSTREAM" -eq 1 ]]; then
+  if ! git remote get-url "$UPSTREAM_REMOTE" >/dev/null 2>&1; then
+    die "remote '${UPSTREAM_REMOTE}' not configured (expected xai-org/grok-build)"
+  fi
+  info "fetch ${UPSTREAM_REMOTE}"
+  git fetch "$UPSTREAM_REMOTE" --tags
+else
+  info "skip fetch (--no-fetch)"
+fi
 
 UPSTREAM_TIP="${UPSTREAM_REMOTE}/${UPSTREAM_REF}"
-if [[ "$UPSTREAM_REF" != main && "$UPSTREAM_REF" != master ]]; then
-  # allow raw sha / tag
-  if git rev-parse --verify "$UPSTREAM_REF" >/dev/null 2>&1; then
-    UPSTREAM_TIP="$UPSTREAM_REF"
-  fi
+if [[ "$UPSTREAM_REF" != "main" && "$UPSTREAM_REF" != "master" ]] \
+  && git rev-parse --verify "${UPSTREAM_REF}^{commit}" >/dev/null 2>&1; then
+  # Prefer an already-resolved raw SHA / tag over a remote branch name.
+  UPSTREAM_TIP="$UPSTREAM_REF"
 fi
-git rev-parse --verify "$UPSTREAM_TIP" >/dev/null 2>&1 \
+git rev-parse --verify "${UPSTREAM_TIP}^{commit}" >/dev/null 2>&1 \
   || die "cannot resolve ${UPSTREAM_TIP}"
+UPSTREAM_TIP="$(git rev-parse "${UPSTREAM_TIP}^{commit}")"
 
 info "upstream tip: $(git rev-parse --short "$UPSTREAM_TIP") $(git log -1 --oneline "$UPSTREAM_TIP")"
 
-# Verify current tree lock against upstream tip when already merged or for check-only.
-if [[ -f Cargo.lock ]]; then
+# Verify current tree lock against upstream tip for policy checks. Before a new
+# merge it may legitimately differ, and finalize mode repairs it first.
+if [[ "$MODE" == "check" && -f Cargo.lock ]]; then
   tmp_up="$(mktemp)"
   git show "${UPSTREAM_TIP}:Cargo.lock" >"$tmp_up"
-  if ! verify_lock_third_party Cargo.lock "$tmp_up" "$UPSTREAM_TIP"; then
-    if [[ "$CHECK_ONLY" -eq 1 ]]; then
-      rm -f "$tmp_up"
-      exit 1
-    fi
-    info "third-party lock drift detected — will restore from upstream after merge"
-  fi
+  verify_lock_third_party Cargo.lock "$tmp_up" "$UPSTREAM_TIP"
   rm -f "$tmp_up"
 fi
 
-if [[ "$CHECK_ONLY" -eq 1 ]]; then
+if [[ "$MODE" == "check" ]]; then
+  git merge-base --is-ancestor "$UPSTREAM_TIP" HEAD \
+    || die "${UPSTREAM_TIP} is not an ancestor of HEAD"
   info "check-only: policy OK"
   exit 0
 fi
 
 if [[ -n "$(git status --porcelain)" ]]; then
-  die "working tree not clean; commit or stash before merge-upstream"
+  die "working tree not clean; start from a clean checkout"
 fi
 
 BASE="$(shipping_base_from_upstream_tree "$UPSTREAM_TIP")"
@@ -247,32 +294,53 @@ if [[ "$CUR" == "${BASE}-"* ]]; then
   info "note: packaging/VERSION is already ${CUR} (base ${BASE}); will set ${FORK_VER} for a full re-sync stamp (edit after if you need -2+)"
 fi
 
-info "merge ${UPSTREAM_TIP} (no commit if conflicts)"
-set +e
-git merge --no-edit "$UPSTREAM_TIP"
-merge_rc=$?
-set -e
+if [[ "$MODE" == "finalize" ]]; then
+  git merge-base --is-ancestor "$UPSTREAM_TIP" HEAD \
+    || die "${UPSTREAM_TIP} is not an ancestor of HEAD; merge it before finalizing"
+else
+  if git merge-base --is-ancestor "$UPSTREAM_TIP" HEAD; then
+    info "already merged: ${UPSTREAM_TIP}"
+    if [[ "$MODE" == "merge" ]]; then
+      exit 0
+    fi
+  else
+    info "merge ${UPSTREAM_TIP} (no Cargo commands in merge phase)"
+    set +e
+    git merge --no-edit "$UPSTREAM_TIP"
+    merge_rc=$?
+    set -e
 
-# Always force upstream lock for third-party, even if merge auto-resolved a hybrid.
+    if [[ "$merge_rc" -ne 0 ]]; then
+      if [[ -f Cargo.lock ]]; then
+        info "resolve Cargo.lock from ${UPSTREAM_TIP}; leave semantic conflicts for Codex"
+        git checkout "$UPSTREAM_TIP" -- Cargo.lock
+      fi
+      echo
+      echo "Merge conflicts remain. No Cargo command or version-stamping script was run."
+      echo "Resolve the remaining files and commit the merge. Then run finalization on"
+      echo "a GitHub-hosted runner:"
+      echo "  packaging/scripts/merge-upstream.sh --finalize-only --no-fetch --ref ${UPSTREAM_TIP}"
+      exit 10
+    fi
+  fi
+
+  if [[ "$MODE" == "merge" ]]; then
+    info "merge-only finished; no Cargo command or version stamp was run"
+    exit 0
+  fi
+fi
+
+# Finalization intentionally runs only after the upstream commit is part of
+# HEAD. This is the only phase that restores/stamps Cargo metadata.
+align_release_workflow_toolchain
 restore_upstream_lock_and_restamp "$UPSTREAM_TIP" "$FORK_VER"
 
-# Re-check
 tmp_up="$(mktemp)"
 git show "${UPSTREAM_TIP}:Cargo.lock" >"$tmp_up"
 verify_lock_third_party Cargo.lock "$tmp_up" "$UPSTREAM_TIP"
 rm -f "$tmp_up"
 verify_toolchain_pin
 
-if [[ "$merge_rc" -ne 0 ]]; then
-  echo
-  echo "Merge reported conflicts. Cargo.lock has been restored from upstream and"
-  echo "shipping versions stamped to ${FORK_VER}."
-  echo "Resolve remaining files, keep fork branding (grok-cli / system-proxy), then:"
-  echo "  git add -A && git commit"
-  echo "  packaging/scripts/merge-upstream.sh --check-only"
-  exit 1
-fi
-
-info "merge finished; packaging/VERSION=${FORK_VER}"
-info "next: resolve any branding conflicts if needed, update CHANGELOG, commit, tag v${FORK_VER}"
+info "finalization finished; packaging/VERSION=${FORK_VER}"
+info "next: update CHANGELOG, commit, and tag v${FORK_VER}"
 info "verify: packaging/scripts/merge-upstream.sh --check-only"

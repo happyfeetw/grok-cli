@@ -46,4 +46,4 @@ jobs:
         run: |
           set -euo pipefail
           chmod +x packaging/scripts/merge-upstream.sh packaging/scripts/verify-upstream-policy.sh
-          packaging/scripts/verify-upstream-policy.sh
+          packaging/scripts/verify-upstream-policy.sh --no-fetch --ref upstream/main
