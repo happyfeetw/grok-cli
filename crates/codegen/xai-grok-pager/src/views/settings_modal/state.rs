@@ -7,9 +7,9 @@ use ratatui::layout::Rect;
 use crate::app::actions::Action;
 use crate::input::line_editor::LineEditor;
 use crate::settings::{
-    EnumChoice, OwnedEnumChoice, PagerLocalSnapshot, SettingCategory, SettingKey, SettingKind,
-    SettingMeta, SettingValue, SettingsRegistry, StringValidator, current_value_for,
-    dynamic_enum_choices,
+    CodingDataSharingLock, EnumChoice, OwnedEnumChoice, PagerLocalSnapshot, SettingCategory,
+    SettingKey, SettingKind, SettingMeta, SettingValue, SettingsRegistry, StringValidator,
+    current_value_for, dynamic_enum_choices,
 };
 use crate::views::modal_window::ModalWindowState;
 
@@ -157,6 +157,14 @@ pub(super) enum SettingsMode {
     },
 }
 
+/// Is the open sub-pane a [`crate::settings::is_consent_chooser`] pane?
+pub(super) fn mode_is_consent_chooser(mode: &SettingsMode) -> bool {
+    matches!(
+        mode,
+        SettingsMode::PickingEnum { key, .. } if crate::settings::is_consent_chooser(key)
+    )
+}
+
 /// Settings modal state. Boxed inside `ActiveModal::Settings` to
 /// avoid clippy `large_enum_variant`.
 pub struct SettingsModalState {
@@ -240,6 +248,16 @@ impl SettingsModalState {
             breadcrumb_hovered: false,
             expanded_keys: std::collections::HashSet::new(),
             hover_row: None,
+        }
+    }
+
+    /// Why a Browse row cannot be edited (`None` = editable). Consulted by
+    /// both render and input.
+    pub fn row_lock(&self, key: SettingKey) -> Option<CodingDataSharingLock> {
+        if key == "coding_data_sharing" {
+            self.pager_snapshot.coding_data_sharing_lock
+        } else {
+            None
         }
     }
 
@@ -551,6 +569,9 @@ impl SettingsModalState {
             let Some((key, meta)) = self.focused_setting() else {
                 return false;
             };
+            if self.row_lock(key).is_some() {
+                return false;
+            }
             // Handles both static `Enum` and `DynamicEnum` catalogs.
             let (supports_preview, resolved): (bool, Vec<OwnedEnumChoice>) = match &meta.kind {
                 SettingKind::Enum {
@@ -788,7 +809,12 @@ pub(super) fn setting_row_visible(
     minimal: bool,
     voice_mode: bool,
 ) -> bool {
-    if !voice_mode && matches!(meta.key, "voice_capture_mode" | "voice_stt_language") {
+    if !voice_mode
+        && matches!(
+            meta.key,
+            "voice_keybind_enabled" | "voice_capture_mode" | "voice_stt_language"
+        )
+    {
         return false;
     }
     if meta.key == "voice_capture_mode" && !kitty_releases {
@@ -801,7 +827,7 @@ pub(super) fn setting_row_visible(
 }
 
 fn build_rows(registry: &SettingsRegistry) -> Vec<RowEntry> {
-    let kitty_releases = crate::app::kitty_flags_pushed();
+    let kitty_releases = crate::app::kitty_releases_reported();
     let minimal = crate::app::minimal_mode_active();
     let voice_mode = crate::app::voice_mode_enabled();
     // Keys that belong to a group sub-sheet are rendered only inside that
@@ -858,6 +884,7 @@ pub(super) fn action_for_bool(key: SettingKey, new: bool) -> Option<Action> {
         "contextual_hints.ssh_wrap" => Some(Action::SetContextualHintSshWrap(new)),
         "multiline_mode" => Some(Action::SetMultilineMode(new)),
         "vim_mode" => Some(Action::SetVimMode(new)),
+        "voice_keybind_enabled" => Some(Action::SetVoiceKeybindEnabled(new)),
         "remember_tool_approvals" => Some(Action::SetRememberToolApprovals(new)),
         "toolset.ask_user_question.timeout_enabled" => {
             Some(Action::SetAskUserQuestionTimeoutEnabled(new))
@@ -1076,7 +1103,7 @@ pub(super) fn effective_enum_choices<'a>(
     choices: &'a [EnumChoice],
     snapshot: &PagerLocalSnapshot,
 ) -> Vec<&'a EnumChoice> {
-    let kitty_releases = crate::app::kitty_flags_pushed();
+    let kitty_releases = crate::app::kitty_releases_reported();
     choices
         .iter()
         .filter(|c| {

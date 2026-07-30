@@ -253,6 +253,13 @@ async fn handle_session_delete(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtR
     let needs_remote =
         agent.is_writeback_storage() && agent.current_auth().is_some_and(|a| !a.is_zdr_team());
 
+    // Tear down any live actor first (cancel turn/subagents/bg tasks,
+    // process-scope kill, flush). Then wipe history so shutdown cannot
+    // rewrite the session directory after delete.
+    if agent.sessions.borrow().contains_key(&session_id) {
+        agent.teardown_live_session_before_delete(&session_id).await;
+    }
+
     // Shared delete: remote-first, then local disk + FTS eviction.
     // Mirrored by the `grok sessions delete <id>` CLI path.
     crate::session::persistence::delete_session_history(
@@ -268,15 +275,6 @@ async fn handle_session_delete(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtR
         }
         acp::Error::internal_error().data(e.to_string())
     })?;
-
-    // If an in-memory live session exists for this id (e.g. the user
-    // deleted history for a session that is still open in another agent
-    // or the current one), shut it down and drop the MvpAgent bookkeeping
-    // so we don't leave a live actor whose on-disk/FTS state is gone.
-    if agent.sessions.borrow().contains_key(&session_id) {
-        agent.request_session_shutdown(&session_id);
-        agent.remove_session(&session_id);
-    }
 
     tracing::info!(session_id = %req.session_id, "Session deleted");
 
@@ -417,23 +415,14 @@ async fn handle_reload_all_mcp_servers(agent: &MvpAgent) -> ExtResult {
         // `load_mcp_servers()` output here was redundant — and silently
         // dropped client servers that exist in no on-disk config, tearing
         // them down on every config hot-reload.
-        let merged = crate::session::managed_mcp::merge_managed_mcp_servers(
-            handle.initial_client_mcp_servers.clone(),
+        if crate::session::managed_mcp::merge_and_send_managed_mcp_update(
+            &handle.cmd_tx,
             &cwd,
+            handle.initial_client_mcp_servers.clone(),
             &managed,
             agent.plugin_registry_handle().snapshot().as_deref(),
             &compat,
-        );
-
-        let (tx, _rx) = tokio::sync::oneshot::channel();
-        if handle
-            .cmd_tx
-            .send(SessionCommand::UpdateMcpServers {
-                mcp_servers: merged,
-                respond_to: tx,
-            })
-            .is_ok()
-        {
+        ) {
             updated += 1;
         }
     }

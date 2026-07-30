@@ -375,6 +375,7 @@ async fn handle_notification(
                 "FileWritten notification forwarded to hunk tracker"
             );
         }
+        ToolNotification::SubagentCompleted(_) => {}
         ToolNotification::TaskCompleted(task_snapshot) => {
             let is_monitor =
                 task_snapshot.kind == xai_grok_tools::computer::types::TaskKind::Monitor;
@@ -935,6 +936,8 @@ mod tests {
             block_waited: false,
             explicitly_killed: false,
             owner_session_id: None,
+            description: None,
+            is_backgrounded: false,
         }
     }
     #[tokio::test]
@@ -2221,6 +2224,8 @@ mod tests {
             block_waited: false,
             explicitly_killed: false,
             owner_session_id: None,
+            description: None,
+            is_backgrounded: false,
         }
     }
     /// Extract the auto-wake prompt text emitted on the session command channel.

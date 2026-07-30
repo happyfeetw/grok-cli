@@ -2071,6 +2071,7 @@ fn dashboard_deferred_plan_mode_applied_on_session_created() {
             agent_id: id,
             session_id: session_id.clone(),
             models: None,
+            scheduler_background_loops: None,
         }),
         &mut app,
     );
@@ -2439,10 +2440,7 @@ fn dashboard_attach_subagent_switches_to_parent_with_subagent_focused() {
         &mut scratch,
         None,
         false,
-        0,
-        &[],
-        &std::collections::BTreeSet::new(),
-        None,
+        crate::app::agent_view::BannerSlotParams::none(),
         &crate::app::bundle::BundleState::default(),
         false,
         &mut Vec::new(),
@@ -5237,6 +5235,7 @@ fn dashboard_attach_roster_focuses_existing_local_agent() {
             agent_id: id,
             session_id: "local-owned".into(),
             models: None,
+            scheduler_background_loops: None,
         }),
         &mut app,
     );

@@ -18,6 +18,12 @@ Start a fresh session and clear the current conversation. Alias: `/clear`.
 
 Open the session picker to reload a previous session from disk.
 
+### `/dashboard`
+
+Open the [Agent Dashboard](23-dashboard.md): live roster of top-level sessions in this pager (peek, reply, dispatch, pin, rename, stop, attach). Aliases: `/agents-dashboard`, `/sessions`.
+
+Not `/config-agents` (alias `/agents`), which manages agent *definitions* and personas. Hidden in minimal mode; disable with `GROK_AGENT_DASHBOARD=0` or `[dashboard].enabled = false`.
+
 ### `/compact [context]`
 
 Compress conversation history to reclaim context-window space. Pass a note to tell Grok what to keep:
@@ -66,7 +72,7 @@ Copy the most recent response to the clipboard. Pass a number to copy the Nth-la
 /copy 2 ~/exports/last-reply.md
 ```
 
-Every copy is also written to a backup file — `~/.grok/last-copy.txt` by default, or `GROK_COPY_FILE` if set — and the toast tells you exactly where the text landed, so you can retrieve it even when the clipboard couldn't be reached or the copy went out as an OSC 52 escape this terminal couldn't confirm.
+Every copy is also written to a backup file — `~/.grok/last-copy.txt` by default, or `GROK_COPY_FILE` if set. Confirmed copies toast briefly (e.g. `Copied!`). Unverified OSC 52 deliveries and clipboard-unreachable fallbacks name the backup path so you can recover the text.
 
 ### `/export`
 
@@ -79,6 +85,12 @@ Quit the application. Alias: `/exit`.
 ### `/home`
 
 Leave the current session and return to the welcome screen. Alias: `/welcome`.
+
+### `/delete`
+
+Delete the current session's history and return to the welcome screen. Confirms first.
+
+To delete a session you are not in, open `/resume` and press `d` then `y`.
 
 ### `/rename`
 
@@ -347,6 +359,16 @@ Browse the in-TUI How-to Guides, open the online Build docs, or jump straight to
 - `/docs web` opens https://docs.x.ai/build/overview in your browser.
 - `/docs <title>` opens a specific guide by case-insensitive title match.
 
+### `/tutorial`
+
+Open the onboarding tutorial: a short list of topics (your first prompt, attaching context, navigation, slash commands, worktrees, plan mode, customization, switching from another agent tool) — each a ~30-second read, with `→` flowing straight to the next topic. Nothing auto-shows — this command (or the command palette) is the way in.
+
+```
+/tutorial
+```
+
+Aliases: `/tour`, `/onboarding`
+
 ### `/import-claude`
 
 Open the Claude import modal to bring over `~/.claude` settings: permissions, environment variables, MCP servers, hooks, and paths.
@@ -358,6 +380,8 @@ Open the Claude import modal to bring over `~/.claude` settings: permissions, en
 ### `/config-agents`
 
 Open the agents modal to view and manage agent definitions, set the default, and switch the active one. Alias: `/agents`.
+
+Not the live multi-session [Agent Dashboard](23-dashboard.md) (`/dashboard` / `Ctrl+\`).
 
 ### `/personas`
 
@@ -386,15 +410,14 @@ View credit usage or manage billing. Alias: `/cost`.
 
 ### `/privacy`
 
-Show or toggle privacy and data-retention status.
+Open Settings on **Coding data, retention, and training**, where you choose
+**Opt in** or **Opt out**. Takes no arguments.
 
 ```
 /privacy
-/privacy opt-in
-/privacy opt-out
 ```
 
-`/privacy` doesn't touch `[features] telemetry`, `trace_upload`, or your external OTEL settings — see [Monitoring Usage](24-monitoring-usage.md#related-settings). On team accounts, only a team admin can toggle privacy this way, and admins can also enable or disable Zero Data Retention for the team ([how to enable ZDR](https://docs.x.ai/developers/faq/security#how-to-enable-zdr)).
+This setting doesn't touch `[features] telemetry`, `trace_upload`, or your external OTEL settings — see [Monitoring Usage](24-monitoring-usage.md#related-settings). On team accounts only a team admin can change it, and admins can also enable or disable Zero Data Retention for the team ([how to enable ZDR](https://docs.x.ai/developers/faq/security#how-to-enable-zdr)). When the choice isn't yours to make, the row says so — `ZDR` or `· Admin Managed` — instead of opening the chooser.
 
 ---
 

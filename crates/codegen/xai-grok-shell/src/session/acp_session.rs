@@ -1591,6 +1591,10 @@ mod permission_auto_mode_tests;
 #[cfg(test)]
 #[path = "acp_session_tests/plan_approval_resume_tests.rs"]
 mod plan_approval_resume_tests;
+/// Mixed-batch plan.md write + exit_plan_mode snapshot.
+#[cfg(test)]
+#[path = "acp_session_tests/plan_exit_batch_barrier_tests.rs"]
+mod plan_exit_batch_barrier_tests;
 /// Plan-mode edit gate: read-only except the plan file, even under allow-all.
 #[cfg(test)]
 #[path = "acp_session_tests/plan_mode_edit_gate_tests.rs"]
@@ -1817,6 +1821,9 @@ mod build_tool_parse_error_message_tests;
 #[cfg(test)]
 #[path = "acp_session_tests/cancel_running_task_tests.rs"]
 mod cancel_running_task_tests;
+#[cfg(test)]
+#[path = "acp_session_tests/turn/chat_history_integrity_tests.rs"]
+mod chat_history_integrity_tests;
 #[cfg(test)]
 #[path = "acp_session_tests/feedback_turn_lookup_tests.rs"]
 mod feedback_turn_lookup_tests;

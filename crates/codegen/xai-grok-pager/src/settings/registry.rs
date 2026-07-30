@@ -226,6 +226,23 @@ pub enum SettingValue {
     Int(i64),
 }
 
+/// Why `coding_data_sharing` cannot be changed in the settings modal.
+/// Computed by `AppView::coding_data_sharing_lock`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CodingDataSharingLock {
+    Zdr,
+    TeamManaged,
+}
+
+impl CodingDataSharingLock {
+    pub fn reason(self) -> &'static str {
+        match self {
+            Self::Zdr => "Your team has Zero Data Retention.",
+            Self::TeamManaged => "Managed by your team admin.",
+        }
+    }
+}
+
 /// Snapshot of pager-local state captured when the modal opens.
 /// Used by `current_value_for` to render against LIVE state rather
 /// than the on-disk `UiConfig`. Refreshed by
@@ -252,6 +269,8 @@ pub struct PagerLocalSnapshot {
     /// `opt_out == false` → canonical "opt-in". Snapshot default is
     /// `true` (opted out) to match the safer consumer default.
     pub coding_data_sharing_opt_out: bool,
+    /// Why `coding_data_sharing` cannot be changed here (`None` = editable).
+    pub coding_data_sharing_lock: Option<CodingDataSharingLock>,
     /// Whether plan mode is active. Uses effective state
     /// (`pending.unwrap_or(active)`) so rapid toggles don't double-send.
     /// Refreshed on all mutation paths including ACP `CurrentModeUpdate`.
@@ -280,6 +299,11 @@ pub struct PagerLocalSnapshot {
     /// language actually in effect when `[ui].voice_stt_language` is unset but
     /// an explicit `[voice].language` applies.
     pub voice_stt_language: String,
+    /// Mirrors `AgentView::scheduler_background_loops` — the value the shell
+    /// pinned for THIS session — falling back to
+    /// `AppView::scheduler_background_loops_seed` before the session response
+    /// lands. `/loop` reads it to describe where a scheduled fire runs.
+    pub scheduler_background_loops: bool,
 }
 
 impl Default for PagerLocalSnapshot {
@@ -291,6 +315,7 @@ impl Default for PagerLocalSnapshot {
             current_model_name: None,
             available_models: Vec::new(),
             coding_data_sharing_opt_out: true,
+            coding_data_sharing_lock: None,
             plan_mode_active: false,
             show_tips: None,
             auto_update: None,
@@ -303,6 +328,8 @@ impl Default for PagerLocalSnapshot {
             auto_mode_gate: false,
             ask_user_question_timeout_enabled: None,
             voice_stt_language: xai_grok_voice::STT_LANGUAGE_DEFAULT.to_string(),
+            // Matches `resolve_scheduler_background_loops`'s default.
+            scheduler_background_loops: true,
         }
     }
 }
@@ -566,6 +593,10 @@ pub fn current_value_for(
         "screen_mode" => Some(SettingValue::Enum(canonical_screen_mode(
             ui.screen_mode.as_deref(),
         ))),
+        // SHELL — whether the Ctrl+Space / F8 chord is active; None → true.
+        "voice_keybind_enabled" => {
+            Some(SettingValue::Bool(ui.voice_keybind_enabled.unwrap_or(true)))
+        }
         // SHELL — canonicalized from `[ui].voice_capture_mode`; None → "hold".
         "voice_capture_mode" => Some(SettingValue::Enum(canonical_voice_capture_mode(
             ui.voice_capture_mode.as_deref(),
@@ -677,6 +708,11 @@ pub fn current_value_for(
 
         _ => None,
     }
+}
+
+/// Consent chooser: no docs tip, and no `d` reset (hint or key).
+pub fn is_consent_chooser(key: &str) -> bool {
+    key == "coding_data_sharing"
 }
 
 /// Default value for `key`, derived from the registry metadata.
@@ -978,6 +1014,14 @@ mod tests {
                         "flash"
                     };
                     assert_eq!(*default, expected);
+                }
+                // voice_keybind_enabled: Option<bool>; None → true.
+                ("voice_keybind_enabled", SettingKind::Bool { default }) => {
+                    assert_eq!(
+                        *default,
+                        ui.voice_keybind_enabled.unwrap_or(true),
+                        "voice_keybind_enabled default drifts from UiConfig::default()",
+                    );
                 }
                 // voice_capture_mode: Option<String>; None → "hold".
                 ("voice_capture_mode", SettingKind::Enum { default, .. }) => {

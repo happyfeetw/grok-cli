@@ -39,6 +39,7 @@ use super::session::load::{
     handle_session_loaded, handle_session_restore_failed, handle_session_restored,
     handle_session_search_debounce_expired, remove_session_from_pickers,
 };
+use super::session::modal::remove_agent_and_cleanup;
 use super::settings::ui::apply_setting_rollback;
 use super::status::{
     commit_session_usage_block, handle_coding_data_sharing_failed,
@@ -216,13 +217,6 @@ pub(crate) fn current_doctor_target(
         _ => None,
     }
 }
-pub(crate) fn doctor_target_is_current(app: &AppView, target: &DoctorFixTarget) -> bool {
-    app.agents.get(&target.agent_id).is_some_and(|agent| {
-        agent.session.session_id == target.session_id
-            && agent.session_binding_epoch == target.session_binding_epoch
-            && agent.session.cwd == target.cwd
-    })
-}
 pub(crate) fn deliver_doctor_message(app: &mut AppView, preferred: AgentId, message: String) {
     let destination = app
         .agents
@@ -251,7 +245,14 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             agent_id,
             session_id,
             models: new_models,
-        } => handle_session_created(app, agent_id, session_id, new_models),
+            scheduler_background_loops,
+        } => handle_session_created(
+            app,
+            agent_id,
+            session_id,
+            new_models,
+            scheduler_background_loops,
+        ),
         TaskResult::SessionFailed { agent_id, error } => {
             handle_session_failed(app, agent_id, error)
         }
@@ -261,6 +262,7 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             worktree_path,
             session_cwd,
             models: new_models,
+            scheduler_background_loops,
         } => handle_worktree_session_created(
             app,
             agent_id,
@@ -268,6 +270,7 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             worktree_path,
             session_cwd,
             new_models,
+            scheduler_background_loops,
         ),
         TaskResult::WorktreeForked {
             agent_id,
@@ -333,6 +336,7 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             restore_summary,
             restore_degree,
             running_prompt_id,
+            scheduler_background_loops,
         } => handle_session_loaded(
             app,
             agent_id,
@@ -342,6 +346,7 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             restore_summary,
             restore_degree,
             running_prompt_id,
+            scheduler_background_loops,
         ),
         TaskResult::SessionTitleFromDisk { agent_id, title } => {
             if let Some(agent) = app.agents.get_mut(&agent_id)
@@ -632,81 +637,9 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             }
             vec![]
         }
-        TaskResult::DoctorFixApplied {
-            target,
-            shell,
-            result,
-        } => {
+        TaskResult::DoctorFixApplied { target, result } => {
             let message = match result {
-                Ok(outcome) => {
-                    let report_agent = doctor_target_is_current(app, &target)
-                        .then_some(target.agent_id)
-                        .or_else(|| match app.active_view {
-                            ActiveView::Agent(id) if app.agents.contains_key(&id) => Some(id),
-                            _ => app.agents.keys().next().copied(),
-                        });
-                    let Some(report_agent) = report_agent else {
-                        let message = match outcome.status {
-                            crate::diagnostics::FixStatus::Applied => {
-                                format!(
-                                    "Set up SSH wrapping in {}.",
-                                    outcome.changed_path.display()
-                                )
-                            }
-                            crate::diagnostics::FixStatus::AlreadyConfigured => {
-                                format!(
-                                    "SSH wrapping is already set up in {}.",
-                                    outcome.changed_path.display()
-                                )
-                            }
-                        };
-                        deliver_doctor_message(app, target.agent_id, message);
-                        return vec![];
-                    };
-                    let Some(mut report) =
-                        super::prompt::collect_live_doctor_report(app, report_agent)
-                    else {
-                        unreachable!("report destination came from app.agents")
-                    };
-                    report = crate::diagnostics::configured_report(
-                        report,
-                        crate::diagnostics::managed_alias_configured(&outcome.changed_path, shell),
-                    );
-                    if report
-                        .findings
-                        .iter()
-                        .any(|finding| finding.id == outcome.id)
-                    {
-                        format!(
-                            "The change was applied, but Doctor still reports `{}`.",
-                            outcome.id
-                        )
-                    } else {
-                        let status = match outcome.status {
-                            crate::diagnostics::FixStatus::Applied => {
-                                format!(
-                                    "Set up SSH wrapping in {}.",
-                                    outcome.changed_path.display()
-                                )
-                            }
-                            crate::diagnostics::FixStatus::AlreadyConfigured => {
-                                format!(
-                                    "SSH wrapping is already set up in {}.",
-                                    outcome.changed_path.display()
-                                )
-                            }
-                        };
-                        let backup = outcome
-                            .backup_path
-                            .as_ref()
-                            .map(|path| format!("\nBackup: {}", path.display()))
-                            .unwrap_or_default();
-                        format!(
-                            "{status}{backup}\nStart a new shell to use the alias.\n\n{}",
-                            crate::diagnostics::format_doctor(&report)
-                        )
-                    }
-                }
+                Ok(outcome) => crate::diagnostics::format_fix_success(&outcome),
                 Err(error) if error.starts_with("Could not apply the fix:") => error,
                 Err(error) => format!("Could not apply the fix: {error}"),
             };
@@ -932,14 +865,17 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             }
             vec![]
         }
-        TaskResult::CodingDataSharingUpdated { agent_id, opted_in } => {
-            handle_coding_data_sharing_updated(app, agent_id, opted_in)
-        }
+        TaskResult::CodingDataSharingUpdated {
+            agent_id,
+            opted_in,
+            seq,
+        } => handle_coding_data_sharing_updated(app, agent_id, opted_in, seq),
         TaskResult::CodingDataSharingFailed {
             agent_id,
             error,
             rollback_to_opted_in,
-        } => handle_coding_data_sharing_failed(app, agent_id, error, rollback_to_opted_in),
+            seq,
+        } => handle_coding_data_sharing_failed(app, agent_id, error, rollback_to_opted_in, seq),
         TaskResult::RenameSessionComplete { agent_id, title } => {
             if let Some(agent) = app.agents.get_mut(&agent_id) {
                 let safe = crate::views::session_title::sanitize_display_text(&title);
@@ -961,10 +897,40 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             }
             vec![]
         }
-        TaskResult::DeleteSessionComplete { source, session_id } => {
-            remove_session_from_pickers(app, &source, &session_id);
+        TaskResult::DeleteSessionComplete {
+            source,
+            session_id,
+            after,
+        } => {
+            use crate::app::actions::AfterSessionDelete;
+            remove_session_from_pickers(
+                app,
+                &source,
+                &session_id,
+                after != AfterSessionDelete::Stay,
+            );
+            if after == AfterSessionDelete::Stay {
+                app.show_toast("Session deleted");
+                return vec![];
+            }
+            let sid = acp::SessionId::new(session_id.clone());
+            let to_remove: Vec<_> = app
+                .agents
+                .iter()
+                .filter(|(_, agent)| agent.session.session_id.as_ref() == Some(&sid))
+                .map(|(id, _)| *id)
+                .collect();
+            let foreground =
+                matches!(app.active_view, ActiveView::Agent(id) if to_remove.contains(&id));
+            for id in to_remove {
+                remove_agent_and_cleanup(app, id);
+            }
+            let mut effects = unregister_session_effect(Some(sid));
+            if foreground && after == AfterSessionDelete::Welcome {
+                effects.extend(dispatch_exit_session(app));
+            }
             app.show_toast("Session deleted");
-            vec![]
+            effects
         }
         TaskResult::DeleteSessionFailed {
             source,

@@ -410,7 +410,7 @@ pub(super) async fn run_session(
                     if let Some(notification) = replay_buffer.flush() {
                         session.emit_buffered(notification).await;
                     }
-                    let (turn_succeeded, infra_pause_message) =
+                    let (turn_succeeded, suppress_goal_continuation, infra_pause_message) =
                         SessionActor::post_turn_goal_degradation_plan(&result);
                     session.handle_completion(prompt_id, result).await;
                     // Drain any monitor events that were routed to the mid-turn buffer
@@ -421,7 +421,9 @@ pub(super) async fn run_session(
                     }
                     // Goal continuation (success) or back-off (non-success).
                     // Owns the streak-tracking and reminder-injection path.
-                    session.handle_turn_end(turn_succeeded).await;
+                    session
+                        .handle_turn_end(turn_succeeded, suppress_goal_continuation)
+                        .await;
                     // Interjections that raced past the turn's final drain
                     // (arrived during turn-end bookkeeping) have no turn left
                     // to merge into — convert them to front-of-queue prompt
@@ -887,7 +889,7 @@ pub(super) async fn run_session(
                                     // Cap to prevent unbounded growth during long tool calls.
                                     const MAX_BUFFER_EVENTS: usize = 50;
                                     buffer.push_capped(
-                                        xai_grok_tools::implementations::grok_build::task::types::MonitorEventNotification {
+                                        xai_grok_tools::implementations::grok_build::monitor::types::MonitorEventNotification {
                                             task_id: task_id.clone(),
                                             event_text,
                                             // Tag with this session's id so the
@@ -1444,11 +1446,16 @@ pub(super) async fn run_session(
 
                             let session_for_mcp = session.clone();
                             let sname = server_name.clone();
+                            let session_cwd = session.session_info.cwd.clone();
                             tokio::task::spawn_local(async move {
                                 session_for_mcp.ensure_mcp_tools_initialized().await;
-                                if let Err(e) = crate::util::config::save_mcp_server_enabled(
-                                    &sname, enabled,
-                                ).await {
+                                if let Err(e) = crate::util::config::save_mcp_server_enabled_in(
+                                    &sname,
+                                    enabled,
+                                    std::path::Path::new(&session_cwd),
+                                )
+                                .await
+                                {
                                     tracing::warn!(
                                         server = sname.as_str(),
                                         error = %e,

@@ -141,17 +141,22 @@ impl ToolBridge {
         template: &str,
         placeholders: &serde_json::Value,
     ) -> Option<String> {
-        let registry = &*self.registry;
-        let result;
-        {
-            result = registry
-                .resources
-                .lock()
-                .await
-                .get::<TemplateRenderer>()
-                .and_then(|r| r.render_with_extra(template, placeholders).ok());
-        }
-        result
+        self.registry
+            .resources
+            .lock()
+            .await
+            .get::<TemplateRenderer>()
+            .and_then(|renderer| renderer.render_with_extra(template, placeholders).ok())
+    }
+
+    /// Return the finalized template renderer for multi-part prompt assembly.
+    pub async fn template_renderer_snapshot(&self) -> Option<TemplateRenderer> {
+        self.registry
+            .resources
+            .lock()
+            .await
+            .get::<TemplateRenderer>()
+            .cloned()
     }
 
     pub async fn register_mcp_tools<T>(
@@ -412,6 +417,16 @@ impl ToolBridge {
         let res = registry.resources.lock().await;
         res.get::<crate::types::skill_discovery_tracker::SkillManager>()
             .map(|m| m.slash_skills())
+            .unwrap_or_default()
+    }
+
+    /// Every skill name from session-start discovery
+    /// (see `SkillManager::discovery_snapshot_names`).
+    pub async fn skill_discovery_snapshot_names(&self) -> Vec<String> {
+        let registry = &*self.registry;
+        let res = registry.resources.lock().await;
+        res.get::<crate::types::skill_discovery_tracker::SkillManager>()
+            .map(|m| m.discovery_snapshot_names().to_vec())
             .unwrap_or_default()
     }
 
@@ -829,6 +844,8 @@ mod tests {
             block_waited: false,
             explicitly_killed: false,
             owner_session_id: owner.map(|s| s.to_string()),
+            description: None,
+            is_backgrounded: false,
         }
     }
 

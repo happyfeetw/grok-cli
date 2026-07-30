@@ -1002,6 +1002,20 @@ pub struct TurnCompleted {
     pub error_category: Option<String>,
 }
 
+/// Model issued a shell tool call whose command is `true` (keepalive thrash signal).
+#[derive(Serialize)]
+pub struct ShellTrueNoop {
+    pub tool_name: String,
+}
+
+/// Harness hard-stopped a turn after identical tool thrash (silent EndTurn).
+#[derive(Serialize)]
+pub struct ActionStationarityStop {
+    pub true_noop: bool,
+    pub run_len: u32,
+    pub tool_name: String,
+}
+
 // ---------------------------------------------------------------------------
 // Tool Calls
 // ---------------------------------------------------------------------------
@@ -1191,6 +1205,34 @@ pub struct AnnouncementCtaClicked {
     pub source: AnnouncementCtaSurface,
 }
 
+#[derive(Debug, Serialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CodingDataConsentSource {
+    PrivacyBanner,
+    Settings,
+}
+
+#[derive(Debug, Serialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CodingDataConsentChoice {
+    OptIn,
+    OptOut,
+}
+
+impl CodingDataConsentChoice {
+    pub fn from_opted_in(opted_in: bool) -> Self {
+        if opted_in { Self::OptIn } else { Self::OptOut }
+    }
+}
+
+#[derive(Serialize)]
+pub struct CodingDataConsentSelected {
+    pub source: CodingDataConsentSource,
+    pub choice: CodingDataConsentChoice,
+    pub previous_choice: CodingDataConsentChoice,
+    pub changed: bool,
+}
+
 /// Flat snapshot of the terminal environment for telemetry.
 ///
 /// Shared across pager events so terminal fields are typed once.
@@ -1204,6 +1246,15 @@ pub struct TerminalTelemetry {
     pub term_var: String,
     pub tmux_version: String,
     pub xtversion: String,
+    /// Raw, as its source reported it — shapes vary (`"3.5.6"`,
+    /// `"20240203-110809-5046fc22"`, `"7402"`). Empty when unknown.
+    pub term_version: String,
+    pub term_version_source: String,
+    /// The Kitty protocol was negotiated *without* `REPORT_EVENT_TYPES` because
+    /// `term_version` identified a build that mis-encodes key releases
+    /// (Alacritty ≤ 0.14.x). A field rather than its own event so the affected
+    /// population always has a denominator.
+    pub kitty_event_types_withheld: bool,
     pub host_os: String,
     pub display_server: String,
     pub modifier_cmd_fate: String,
@@ -1700,6 +1751,8 @@ telemetry_event!(
     "turn_completed",
     external = crate::external::schema::map_turn_completed
 );
+telemetry_event!(ShellTrueNoop, "shell_true_noop");
+telemetry_event!(ActionStationarityStop, "action_stationarity_stop");
 telemetry_event!(
     ToolCallCompleted,
     "tool_call_completed",
@@ -1724,6 +1777,7 @@ telemetry_event!(SuperGrokUpsellShown, "supergrok_upsell_shown");
 telemetry_event!(SuperGrokUpsellClicked, "supergrok_upsell_clicked");
 telemetry_event!(AnnouncementCtaShown, "announcement_cta_shown");
 telemetry_event!(AnnouncementCtaClicked, "announcement_cta_clicked");
+telemetry_event!(CodingDataConsentSelected, "coding_data_consent_selected");
 telemetry_event!(TerminalTelemetry, "terminal_context");
 telemetry_event!(DisplayRefreshProbe, "display_refresh_probe");
 telemetry_event!(BackspaceNoEffect, "backspace_no_effect");
@@ -1831,6 +1885,9 @@ mod tests {
             term_var: "xterm-256color".into(),
             tmux_version: "".into(),
             xtversion: "".into(),
+            term_version: "".into(),
+            term_version_source: "none".into(),
+            kitty_event_types_withheld: false,
             host_os: "linux".into(),
             display_server: "unknown".into(),
             modifier_cmd_fate: "unknown".into(),
@@ -1994,6 +2051,30 @@ mod tests {
     fn announcement_cta_event_names() {
         assert_eq!(AnnouncementCtaShown::NAME, "announcement_cta_shown");
         assert_eq!(AnnouncementCtaClicked::NAME, "announcement_cta_clicked");
+    }
+
+    #[test]
+    fn coding_data_consent_selected_name_and_shape() {
+        assert_eq!(
+            CodingDataConsentSelected::NAME,
+            "coding_data_consent_selected"
+        );
+        let event = serde_json::to_value(CodingDataConsentSelected {
+            source: CodingDataConsentSource::Settings,
+            choice: CodingDataConsentChoice::OptIn,
+            previous_choice: CodingDataConsentChoice::OptIn,
+            changed: false,
+        })
+        .unwrap();
+        assert_eq!(
+            event,
+            serde_json::json!({
+                "source": "settings",
+                "choice": "opt_in",
+                "previous_choice": "opt_in",
+                "changed": false,
+            })
+        );
     }
 
     #[test]

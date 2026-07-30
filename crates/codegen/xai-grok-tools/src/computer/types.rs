@@ -110,6 +110,8 @@ pub struct TerminalRunRequest {
     /// `kill_all_background_tasks_by_owner` only targets the requesting
     /// session's processes — not the parent's or sibling's.
     pub owner_session_id: Option<String>,
+    /// Model-supplied label for task UI / snapshots.
+    pub description: Option<String>,
 }
 
 /// Distinguishes different types of background tasks.
@@ -214,6 +216,12 @@ pub struct TaskSnapshot {
     /// the parent's or sibling's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner_session_id: Option<String>,
+    /// Model-supplied label for task UI / snapshots.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// True after explicit/user/auto backgrounding; false for pure foreground runs.
+    #[serde(default)]
+    pub is_backgrounded: bool,
 }
 
 impl TaskSnapshot {
@@ -232,6 +240,11 @@ impl TaskSnapshot {
     /// backing work).
     pub fn is_outstanding(&self) -> bool {
         !self.completed
+    }
+
+    /// Incomplete and backgrounded — tray/`tasks_snapshot` predicate (not FG in-flight).
+    pub fn is_outstanding_background(&self) -> bool {
+        !self.completed && self.is_backgrounded
     }
 }
 
@@ -320,6 +333,11 @@ pub trait TerminalBackend: Send + Sync {
     }
 
     /// Wait for a background task to complete, with optional timeout.
+    ///
+    /// # Panics / overflow
+    /// Implementations may add `timeout` to `Instant::now()`. Callers must
+    /// bound `timeout` (e.g. via `capped_wait_timeout`) so the sum stays
+    /// representable; unbounded model `timeout_ms` can overflow.
     async fn wait_for_completion(
         &self,
         task_id: &str,

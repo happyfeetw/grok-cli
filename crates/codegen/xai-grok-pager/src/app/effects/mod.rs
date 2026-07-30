@@ -7,10 +7,13 @@
 //! back through dispatch.
 mod helpers;
 use super::actions;
+use super::session_title_resolve::worktree_resume_failure_message;
 #[allow(unused_imports)]
 use super::{agent, dispatch};
 pub use helpers::ConversationsPartial;
-pub(super) use helpers::parse_session_load_running_prompt_id;
+pub(super) use helpers::{
+    parse_session_load_running_prompt_id, parse_session_scheduler_background_loops,
+};
 pub(crate) use helpers::{
     EffectMeta, RestoreProgressMsg, SessionFlags, persist_permission_mode_and_notify,
     persist_setting, sanitize_user_error,
@@ -198,6 +201,9 @@ pub(crate) fn execute(
                                 agent_id,
                                 session_id: resp.session_id,
                                 models: resp.models,
+                                scheduler_background_loops: parse_session_scheduler_background_loops(
+                                    resp.meta.as_ref(),
+                                ),
                             }
                         }
                         Err(e) => {
@@ -248,6 +254,7 @@ pub(crate) fn execute(
                     .insert("sessionId".into(), serde_json::json!(sid));
             }
             let restore_code = session_flags.restore_code;
+            let resume_local_miss = session_flags.resume_local_miss.clone();
             tracing::info!(
                 ?restore_code,
                 ?load_session_id,
@@ -257,6 +264,9 @@ pub(crate) fn execute(
             tasks
                 .spawn(async move {
                     if let Some(sid) = load_session_id {
+                        let local_miss = resume_local_miss
+                            .as_deref()
+                            .filter(|t| *t == sid);
                         let resume_started = std::time::Instant::now();
                         let wt_type = xai_grok_shell::util::config::worktree_type();
                         let copy_mode = if git_ref.is_some() {
@@ -300,10 +310,9 @@ pub(crate) fn execute(
                             );
                                 return TaskResult::WorktreeSessionFailed {
                                     agent_id,
-                                    error: sanitize_user_error(
-                                        &format!(
-                                    "couldn't resume worktree session: {e}"
-                                ),
+                                    error: worktree_resume_failure_message(
+                                        local_miss,
+                                        &sanitize_user_error(&e.to_string()),
                                     ),
                                 };
                             }
@@ -315,10 +324,9 @@ pub(crate) fn execute(
                             Err(e) => {
                                 return TaskResult::WorktreeSessionFailed {
                                     agent_id,
-                                    error: sanitize_user_error(
-                                        &format!(
-                                    "couldn't resume worktree session: {e}"
-                                ),
+                                    error: worktree_resume_failure_message(
+                                        local_miss,
+                                        &sanitize_user_error(&e.to_string()),
                                     ),
                                 };
                             }
@@ -333,10 +341,9 @@ pub(crate) fn execute(
                                 .unwrap_or_else(|| err.to_string());
                             return TaskResult::WorktreeSessionFailed {
                                 agent_id,
-                                error: sanitize_user_error(
-                                    &format!(
-                                "couldn't resume worktree session: {msg}"
-                            ),
+                                error: worktree_resume_failure_message(
+                                    local_miss,
+                                    &sanitize_user_error(&msg),
                                 ),
                             };
                         }
@@ -491,6 +498,9 @@ pub(crate) fn execute(
                                 worktree_path: worktree_root,
                                 session_cwd,
                                 models: resp.models,
+                                scheduler_background_loops: parse_session_scheduler_background_loops(
+                                    resp.meta.as_ref(),
+                                ),
                             }
                         }
                         Err(e) => {
@@ -572,6 +582,9 @@ pub(crate) fn execute(
                                 restore_summary,
                                 restore_degree,
                                 running_prompt_id,
+                                scheduler_background_loops: parse_session_scheduler_background_loops(
+                                    resp.meta.as_ref(),
+                                ),
                             }
                         }
                         Err(e) => {
@@ -1867,7 +1880,6 @@ pub(crate) fn execute(
         Effect::ApplyDoctorFix { target, plan } => {
             tasks
                 .spawn(async move {
-                    let shell = plan.shell;
                     let result = tokio::task::spawn_blocking(move || crate::diagnostics::apply_fix(
                             *plan,
                         ))
@@ -1876,7 +1888,6 @@ pub(crate) fn execute(
                         .and_then(|result| result.map_err(|error| error.to_string()));
                     TaskResult::DoctorFixApplied {
                         target,
-                        shell,
                         result,
                     }
                 });
@@ -3236,7 +3247,7 @@ pub(crate) fn execute(
                     }
                 });
         }
-        Effect::DeleteSession { source, session_id, cwd } => {
+        Effect::DeleteSession { source, session_id, cwd, after } => {
             let tx = acp_tx.clone();
             tasks
                 .spawn(async move {
@@ -3280,6 +3291,7 @@ pub(crate) fn execute(
                             TaskResult::DeleteSessionComplete {
                                 source,
                                 session_id,
+                                after,
                             }
                         }
                         Err(e) => {
@@ -3294,7 +3306,12 @@ pub(crate) fn execute(
                     }
                 });
         }
-        Effect::SetCodingDataSharing { agent_id, opted_in, rollback_to_opted_in } => {
+        Effect::SetCodingDataSharing {
+            agent_id,
+            opted_in,
+            rollback_to_opted_in,
+            seq,
+        } => {
             let tx = acp_tx.clone();
             tasks
                 .spawn(async move {
@@ -3317,6 +3334,7 @@ pub(crate) fn execute(
                                         agent_id,
                                         error: format!("malformed response: {e}"),
                                         rollback_to_opted_in,
+                                        seq,
                                     };
                                 }
                             };
@@ -3332,6 +3350,7 @@ pub(crate) fn execute(
                                     agent_id,
                                     error: msg,
                                     rollback_to_opted_in,
+                                    seq,
                                 };
                             }
                             let confirmed_opted_in = wrapper
@@ -3342,6 +3361,7 @@ pub(crate) fn execute(
                             TaskResult::CodingDataSharingUpdated {
                                 agent_id,
                                 opted_in: confirmed_opted_in,
+                                seq,
                             }
                         }
                         Err(e) => {
@@ -3349,6 +3369,7 @@ pub(crate) fn execute(
                                 agent_id,
                                 error: format!("{e}"),
                                 rollback_to_opted_in,
+                                seq,
                             }
                         }
                     }
@@ -4219,10 +4240,11 @@ pub(crate) fn execute(
                                         .to_owned()
                                 });
                             xai_grok_shell::remote::fetch_settings_blocking(
-                                &proxy_base,
-                                &auth,
-                                None,
-                            )
+                                    &proxy_base,
+                                    &auth,
+                                    None,
+                                )
+                                .into_option()
                         })
                         .await
                         .ok()

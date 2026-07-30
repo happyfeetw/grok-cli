@@ -702,6 +702,22 @@ impl ToolOutput {
     pub fn to_prompt_format(&self) -> String {
         match self {
             ToolOutput::ReadFile(read_file_output) => match read_file_output {
+                ReadFileOutput::FileContent(file_content) if file_content.content.is_empty() => {
+                    if file_content.total_lines == 0 {
+                        "File is empty.".to_string()
+                    } else if file_content
+                        .offset
+                        .is_some_and(|offset| offset > file_content.total_lines)
+                    {
+                        format!(
+                            "(no lines returned: the requested window is past the end of the \
+                             file; the file has {} lines)",
+                            file_content.total_lines
+                        )
+                    } else {
+                        "(no lines returned)".to_string()
+                    }
+                }
                 ReadFileOutput::FileContent(file_content) => file_content.content.clone(),
                 ReadFileOutput::ImageContent(image_content) => {
                     format!(
@@ -801,20 +817,22 @@ impl ToolOutput {
                         format!("=== Task {} ===", r.task_id),
                         format!("Command: {}", r.command),
                         format!("Status: {}", r.status),
-                        format!("Started: {}", r.started),
+                        format!("Duration: {:.2}s", r.duration_secs),
                     ];
-                    if let Some(ref ended) = r.ended {
-                        lines.push(format!("Ended: {}", ended));
-                    }
-                    lines.push(format!("Duration: {:.2}s", r.duration_secs));
                     if let Some(code) = r.exit_code {
                         lines.push(format!("Exit Code: {}", code));
                     }
-                    lines.push(format!("Output File: {}", r.output_file));
+                    if !r.output_file.is_empty() {
+                        lines.push(format!("Output File: {}", r.output_file));
+                    }
                     lines.push(String::new());
                     lines.push("=== Output ===".to_string());
                     if r.output.is_empty() {
-                        lines.push("(no output yet)".to_string());
+                        if r.status == "running" {
+                            lines.push("(no output yet)".to_string());
+                        } else {
+                            lines.push("(no output)".to_string());
+                        }
                     } else {
                         lines.push(r.output.clone());
                     }
@@ -1285,6 +1303,65 @@ mod tests {
     fn to_json(output: ToolOutput) -> serde_json::Value {
         serde_json::to_value(&output).unwrap()
     }
+    fn empty_file_content(offset: Option<usize>, total_lines: usize) -> FileContent {
+        FileContent {
+            content: String::new(),
+            content_concise: None,
+            absolute_path: PathBuf::from("/tmp/f.txt"),
+            offset,
+            limit: None,
+            raw_output: String::new(),
+            total_lines,
+            extracted_images: vec![],
+        }
+    }
+    /// An empty file must render an explicit notice, not a blank result.
+    #[test]
+    fn read_empty_file_prompt_says_file_is_empty() {
+        let output = ToolOutput::ReadFile(ReadFileOutput::FileContent(empty_file_content(None, 0)));
+        assert_eq!(output.to_prompt_format(), "File is empty.");
+    }
+    /// An offset beyond the last line must say past-EOF and report the real
+    /// line count.
+    #[test]
+    fn read_past_eof_prompt_reports_line_count() {
+        let output = ToolOutput::ReadFile(ReadFileOutput::FileContent(empty_file_content(
+            Some(101),
+            100,
+        )));
+        let prompt = output.to_prompt_format();
+        assert!(
+            prompt.contains("past the end of the file"),
+            "expected past-EOF notice, got: {prompt}"
+        );
+        assert!(
+            prompt.contains("100 lines"),
+            "expected real line count, got: {prompt}"
+        );
+    }
+    /// An empty window with an in-range offset (e.g. `limit: 0`) must render
+    /// the generic notice, not a bogus past-EOF claim.
+    #[test]
+    fn read_empty_window_in_range_offset_is_not_past_eof() {
+        let output = ToolOutput::ReadFile(ReadFileOutput::FileContent(empty_file_content(
+            Some(5),
+            100,
+        )));
+        let prompt = output.to_prompt_format();
+        assert_eq!(prompt, "(no lines returned)");
+        assert!(
+            !prompt.contains("past the end of the file"),
+            "in-range empty window must not claim past-EOF: {prompt}"
+        );
+    }
+    /// Non-empty content renders unchanged.
+    #[test]
+    fn read_non_empty_content_renders_verbatim() {
+        let mut fc = empty_file_content(None, 3);
+        fc.content = "1→a\nb\nc".to_string();
+        let output = ToolOutput::ReadFile(ReadFileOutput::FileContent(fc));
+        assert_eq!(output.to_prompt_format(), "1→a\nb\nc");
+    }
     #[test]
     fn text_output_to_prompt_format_omits_consumed_completion_task_id() {
         let output = ToolOutput::Text(TextOutput {
@@ -1578,6 +1655,58 @@ mod tests {
         );
     }
     #[test]
+    fn apply_patch_parse_error_json() {
+        let json = to_json(ApplyPatchOutput::ParseError("Invalid patch: boom".into()).into());
+        assert_eq!(
+            json,
+            json!({"type": "ApplyPatch", "ParseError": "Invalid patch: boom"})
+        );
+    }
+    #[test]
+    fn apply_patch_application_error_json() {
+        let json = to_json(
+            ApplyPatchOutput::ApplicationError("File /tmp/x.rs does not exist".into()).into(),
+        );
+        assert_eq!(
+            json,
+            json!({"type": "ApplyPatch", "ApplicationError": "File /tmp/x.rs does not exist"})
+        );
+    }
+    #[test]
+    fn apply_patch_empty_patch_json() {
+        let json = to_json(ApplyPatchOutput::EmptyPatch("No files were modified.".into()).into());
+        assert_eq!(
+            json,
+            json!({"type": "ApplyPatch", "EmptyPatch": "No files were modified."})
+        );
+    }
+    /// `Success` must not serialize under any of the keys Python treats as a
+    /// failure, otherwise a successful patch would be taxed as a tool error.
+    #[test]
+    fn apply_patch_success_json_is_not_an_error_shape() {
+        let json = to_json(
+            ApplyPatchOutput::Success {
+                files: vec![ApplyPatchFileResult {
+                    path: PathBuf::from("/repo/src/main.rs"),
+                    action: "modified".into(),
+                    old_text: Some("old".into()),
+                    new_text: "new".into(),
+                    move_to: None,
+                }],
+                tool_output_for_prompt: "Updated /repo/src/main.rs".into(),
+            }
+            .into(),
+        );
+        assert_eq!(json["type"], "ApplyPatch");
+        assert!(json.get("Success").is_some(), "missing Success key: {json}");
+        for key in ["ParseError", "ApplicationError", "EmptyPatch"] {
+            assert!(
+                json.get(key).is_none(),
+                "success must not serialize under the error key {key}: {json}"
+            );
+        }
+    }
+    #[test]
     fn kill_task_result_json() {
         let json = to_json(
             KillTaskOutput::Result(KillTaskResult {
@@ -1640,6 +1769,55 @@ mod tests {
         assert!(json.get("Result").is_some(), "missing Result key: {json}");
         assert_eq!(json["Result"]["task_id"], "task-1");
         assert_eq!(json["Result"]["status"], "running");
+    }
+    /// The single-task detail view is duration-only: absolute `started` /
+    /// `ended` instants stay on the wire struct but must not reach the prompt.
+    #[test]
+    fn task_output_prompt_is_duration_only() {
+        let out = ToolOutput::TaskOutput(TaskOutputOutput::Result(TaskOutputResult {
+            task_id: "task-1".into(),
+            command: "sleep 10".into(),
+            status: "completed".into(),
+            exit_code: Some(0),
+            started: "2026-03-09T00:00:00Z".into(),
+            ended: Some("2026-03-09T00:00:05Z".into()),
+            duration_secs: 5.0,
+            output: "hello".into(),
+            output_file: "/tmp/task-1.log".into(),
+            truncated: false,
+            truncation_hint: String::new(),
+            raw_output_bytes: 5,
+        }));
+        let prompt = out.to_prompt_format();
+        assert!(prompt.contains("Duration: 5.00s"), "{prompt}");
+        assert!(prompt.contains("Output File: /tmp/task-1.log"), "{prompt}");
+        assert!(
+            !prompt.contains("Started") && !prompt.contains("Ended"),
+            "absolute instants must not be model-visible: {prompt}"
+        );
+        assert!(
+            !prompt.contains("2026-03-09"),
+            "no wall-clock date may survive into the prompt: {prompt}"
+        );
+    }
+    #[test]
+    fn task_output_prompt_omits_empty_output_file() {
+        let out = ToolOutput::TaskOutput(TaskOutputOutput::Result(TaskOutputResult {
+            task_id: "task-2".into(),
+            command: "true".into(),
+            status: "completed".into(),
+            exit_code: Some(0),
+            started: String::new(),
+            ended: None,
+            duration_secs: 0.1,
+            output: "done".into(),
+            output_file: String::new(),
+            truncated: false,
+            truncation_hint: String::new(),
+            raw_output_bytes: 4,
+        }));
+        let prompt = out.to_prompt_format();
+        assert!(!prompt.contains("Output File"), "{prompt}");
     }
     fn make_result(status: &str, raw_output_bytes: usize) -> TaskOutputResult {
         TaskOutputResult {

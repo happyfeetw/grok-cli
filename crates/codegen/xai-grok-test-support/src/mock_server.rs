@@ -20,7 +20,7 @@ use anyhow::Context as _;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::sse::{KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use futures_util::stream;
 use serde_json::{Value, json};
@@ -246,7 +246,8 @@ struct StorageState {
 }
 
 /// Mock `/v1/chat/completions` + `/v1/responses` + `/v1/messages` +
-/// `/v1/models` + `/v1/settings` + `/v1/storage` server.
+/// `/v1/models` + `/v1/settings` + `/v1/storage` +
+/// `/v1/privacy/coding-data-retention` server.
 /// Logs all requests. Shuts down on drop.
 pub struct MockInferenceServer {
     addr: SocketAddr,
@@ -266,6 +267,9 @@ pub struct MockInferenceServer {
     chunk_delay: Arc<std::sync::RwLock<Option<Duration>>>,
     /// Mock `/v1/storage` 401 gate + accepted-upload record.
     storage: Arc<StorageState>,
+    /// When set, `/v1/models` and `/v1/settings` hang forever (never
+    /// respond); see [`Self::set_hang`].
+    hang: Arc<std::sync::atomic::AtomicBool>,
     /// See [`Self::set_user_subscription_tier`].
     user_tier: Arc<std::sync::RwLock<Option<String>>>,
 }
@@ -305,6 +309,7 @@ impl MockInferenceServer {
         let messages_stop_reason = Arc::new(std::sync::RwLock::new("end_turn".to_string()));
         let chunk_delay = Arc::new(std::sync::RwLock::new(None::<Duration>));
         let storage = Arc::new(StorageState::default());
+        let hang = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let user_tier = Arc::new(std::sync::RwLock::new(None::<String>));
         let app = Self::build_router(
             log.clone(),
@@ -316,6 +321,7 @@ impl MockInferenceServer {
             messages_stop_reason.clone(),
             chunk_delay.clone(),
             storage.clone(),
+            hang.clone(),
             user_tier.clone(),
         );
 
@@ -355,6 +361,7 @@ impl MockInferenceServer {
             messages_stop_reason,
             chunk_delay,
             storage,
+            hang,
             user_tier,
         })
     }
@@ -423,6 +430,12 @@ impl MockInferenceServer {
     /// `false` and would sit on the upsell screen).
     pub fn preset_allow_access(&self) {
         self.set_settings(json!({ "allow_access": true }));
+    }
+
+    /// Make `/v1/models` and `/v1/settings` hang forever, standing in for a
+    /// black-holed backend in non-blocking-startup tests.
+    pub fn set_hang(&self, hang: bool) {
+        self.hang.store(hang, std::sync::atomic::Ordering::Release);
     }
 
     /// Set the `subscriptionTier` served by `GET /v1/user`. `None`
@@ -662,8 +675,11 @@ impl MockInferenceServer {
         messages_stop_reason: Arc<std::sync::RwLock<String>>,
         chunk_delay: Arc<std::sync::RwLock<Option<Duration>>>,
         storage: Arc<StorageState>,
+        hang: Arc<std::sync::atomic::AtomicBool>,
         user_tier: Arc<std::sync::RwLock<Option<String>>>,
     ) -> Router {
+        let hang_models = hang.clone();
+        let hang_settings = hang;
         let log_cc = log.clone();
         let log_rs = log.clone();
         let log_msg = log.clone();
@@ -919,8 +935,12 @@ impl MockInferenceServer {
                     move || {
                         let log = log.clone();
                         let models = models.clone();
+                        let hang = hang_models.clone();
                         async move {
                             log.record("GET", "/v1/models", None, None, Vec::new());
+                            if hang.load(std::sync::atomic::Ordering::Acquire) {
+                                tokio::time::sleep(Duration::from_secs(3600)).await;
+                            }
                             let models_json = models.read().unwrap().clone();
                             Json(json!({
                                 "object": "list",
@@ -934,12 +954,18 @@ impl MockInferenceServer {
                 "/v1/settings",
                 get({
                     let log = log.clone();
+                    let settings = settings.clone();
+                    let hang = hang_settings.clone();
                     move || {
                         let log = log.clone();
                         let settings = settings.clone();
                         let overrides = overrides_settings.clone();
+                        let hang = hang.clone();
                         async move {
                             log.record("GET", "/v1/settings", None, None, Vec::new());
+                            if hang.load(std::sync::atomic::Ordering::Acquire) {
+                                tokio::time::sleep(Duration::from_secs(3600)).await;
+                            }
                             // Scripted one-shots take precedence (FIFO), so a
                             // test can serve a transient payload (e.g. one
                             // stale gated snapshot) and fall back to the
@@ -952,6 +978,32 @@ impl MockInferenceServer {
                                 Some(s) => Json(s).into_response(),
                                 None => StatusCode::NOT_FOUND.into_response(),
                             }
+                        }
+                    }
+                }),
+            )
+            .route(
+                "/v1/privacy/coding-data-retention",
+                put({
+                    let log = log.clone();
+                    move |headers: HeaderMap, Json(body): Json<Value>| {
+                        let log = log.clone();
+                        async move {
+                            let auth = Self::extract_auth(&headers);
+                            log.record(
+                                "PUT",
+                                "/v1/privacy/coding-data-retention",
+                                Some(&body),
+                                auth.as_deref(),
+                                Self::headers_vec(&headers),
+                            );
+                            // Echo the received flag back like the real
+                            // cli-chat-proxy does on success.
+                            let opt_out = body
+                                .get("codingDataRetentionOptOut")
+                                .cloned()
+                                .unwrap_or(Value::Bool(false));
+                            Json(json!({ "codingDataRetentionOptOut": opt_out }))
                         }
                     }
                 }),
@@ -1672,6 +1724,39 @@ mod tests {
         assert_eq!(resp.status(), 200);
         let body: Value = resp.json().await.unwrap();
         assert_eq!(body, json!({ "allow_access": true }));
+    }
+
+    #[tokio::test]
+    async fn privacy_coding_data_retention_echoes_flag_and_logs() {
+        let server = MockInferenceServer::start().await.unwrap();
+        let url = format!("{}/privacy/coding-data-retention", server.url());
+
+        for flag in [false, true] {
+            let resp = reqwest::Client::new()
+                .put(&url)
+                .json(&json!({ "codingDataRetentionOptOut": flag }))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), 200);
+            let body: Value = resp.json().await.unwrap();
+            assert_eq!(body, json!({ "codingDataRetentionOptOut": flag }));
+        }
+
+        let entries = server.requests();
+        let puts: Vec<_> = entries
+            .iter()
+            .filter(|e| e.method == "PUT" && e.path == "/v1/privacy/coding-data-retention")
+            .collect();
+        assert_eq!(puts.len(), 2);
+        assert_eq!(
+            puts[0].body,
+            Some(json!({ "codingDataRetentionOptOut": false }))
+        );
+        assert_eq!(
+            puts[1].body,
+            Some(json!({ "codingDataRetentionOptOut": true }))
+        );
     }
 
     #[tokio::test]

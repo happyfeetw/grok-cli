@@ -224,6 +224,9 @@ impl MemoryConfig {
 pub struct SubagentsConfig {
     /// Whether subagent support is enabled.
     pub enabled: bool,
+    /// Raw `[subagents] max_depth` (i64 so out-of-range parses; clamped ≥1 at resolve).
+    #[serde(default)]
+    pub max_depth: Option<i64>,
     /// Per-subagent model ID overrides.
     /// Keys are agent names, values are model IDs that must exist in the
     /// available models registry. Parsed from `[subagents.models]` in config.toml.
@@ -430,13 +433,61 @@ impl SubagentsConfig {
         let roles_dir = cwd.join(".grok").join("roles");
         self.discover_roles_in_dir(&roles_dir);
     }
+    pub const ENV_MAX_DEPTH: &'static str = "GROK_SUBAGENTS_MAX_DEPTH";
+    pub const DEFAULT_MAX_DEPTH: u32 = 1;
+    /// Clamp to `1..=u32::MAX`. Values below 1 (including 0 / negatives) warn
+    /// and become 1 so nesting is never accidentally disabled.
+    pub fn clamp_max_depth(raw: i64, source: &str) -> u32 {
+        if raw < i64::from(Self::DEFAULT_MAX_DEPTH) {
+            tracing::warn!(
+                source,
+                value = raw,
+                "subagents max_depth < 1; clamping to 1"
+            );
+            Self::DEFAULT_MAX_DEPTH
+        } else if raw > i64::from(u32::MAX) {
+            tracing::warn!(
+                source,
+                value = raw,
+                "subagents max_depth exceeds u32::MAX; clamping"
+            );
+            u32::MAX
+        } else {
+            raw as u32
+        }
+    }
+    /// Precedence: env > TOML > remote > [`Self::DEFAULT_MAX_DEPTH`].
+    ///
+    /// Depth 0 is the top-level session; a child is parent+1. Spawn is rejected
+    /// when `depth >= max`. So `max = 1` allows only top-level spawns; nested
+    /// spawns from a first-level subagent need `max >= 2`.
+    pub fn resolve_max_depth(env: Option<&str>, config: Option<i64>, remote: Option<u32>) -> u32 {
+        if let Some(raw) = env {
+            match raw.trim().parse::<i64>() {
+                Ok(v) => return Self::clamp_max_depth(v, "env"),
+                Err(_) => {
+                    tracing::warn!(
+                        value = %raw,
+                        "invalid GROK_SUBAGENTS_MAX_DEPTH (expected integer); ignoring"
+                    );
+                }
+            }
+        }
+        if let Some(v) = config {
+            return Self::clamp_max_depth(v, "config");
+        }
+        if let Some(v) = remote {
+            return Self::clamp_max_depth(i64::from(v), "remote");
+        }
+        Self::DEFAULT_MAX_DEPTH
+    }
     /// Resolve the final subagents config from all sources (in priority order):
     /// 1. CLI flag `--subagents` (absolute highest — always enables)
     /// 2. `GROK_SUBAGENTS` env var: `1`/`true` enables, `0`/`false` force-disables
     /// 3. Config file `[subagents]` section
     /// 4. Default (enabled)
     ///
-    /// Subagents are deliberately not remotely gated — only explicit local
+    /// `enabled` is deliberately not remotely gated — only explicit local
     /// intent (CLI flag, `GROK_SUBAGENTS`, `[subagents] enabled`) changes
     /// the default.
     ///
@@ -840,6 +891,19 @@ impl StorageMode {
         }
         Self::Local
     }
+    /// Resolve from remote settings, enforcing the rule that `Writeback`
+    /// requires grok.com auth (it syncs to grok-code-backend). This is the
+    /// single home for that gate, used at boot ([`crate::agent::init`]) and by
+    /// the post-readiness self-heal (`MvpAgent::reapply_storage_mode`).
+    pub fn from_remote_gated(
+        remote: Option<&crate::util::config::RemoteSettings>,
+        has_xai_auth: bool,
+    ) -> Self {
+        match Self::resolve(None, remote) {
+            Self::Writeback if !has_xai_auth => Self::Local,
+            mode => mode,
+        }
+    }
     /// Returns true if this mode syncs to the backend.
     pub fn is_writeback(&self) -> bool {
         matches!(self, Self::Writeback)
@@ -1146,6 +1210,17 @@ fn apply_requirements_inner(
     enforce_str!("models", "web_search", config.models.web_search);
     enforce_str!("cli", "channel", config.cli.channel);
     enforce_str!("cli", "minimum_version", config.cli.minimum_version);
+    enforce_str!("cli", "maximum_version", config.cli.maximum_version);
+    enforce_str!(
+        "cli",
+        "required_minimum_version",
+        config.cli.required_minimum_version
+    );
+    enforce_str!(
+        "cli",
+        "required_maximum_version",
+        config.cli.required_maximum_version
+    );
     if let Some(val) = req_str(req, "endpoints", "xai_api_base_url")
         && config.endpoints.xai_api_base_url != val
     {
@@ -1311,12 +1386,17 @@ pub fn apply_sandbox(
     #[cfg(target_os = "linux")]
     let requires_read_deny = xai_grok_sandbox::requires_read_deny(&sandbox_profile, &workspace);
     #[cfg(target_os = "linux")]
+    let requires_hook_write_deny =
+        xai_grok_sandbox::requires_hook_write_deny(&sandbox_profile, &workspace);
+    #[cfg(target_os = "linux")]
+    let requires_bwrap = requires_read_deny || requires_hook_write_deny;
+    #[cfg(target_os = "linux")]
     {
         let refuse_unprotected = |detail: &str| {
             eprintln!(
-                "error: this sandbox could not enforce its read-deny set on Linux \
-                 (bubblewrap missing/unusable, or a deny glob exceeded its expansion \
-                 limit — see any message above). Install bubblewrap with \
+                "error: this sandbox could not enforce its mount-namespace deny set \
+                 on Linux (bubblewrap missing/unusable, or a deny glob exceeded its \
+                 expansion limit — see any message above). Install bubblewrap with \
                  `apt install -y bubblewrap` if needed. Refusing to start with denied \
                  paths unprotected.{detail}"
             );
@@ -1325,7 +1405,7 @@ pub fn apply_sandbox(
             Some(mut cmd) => {
                 use std::os::unix::process::CommandExt;
                 let err = cmd.exec();
-                if requires_read_deny {
+                if requires_bwrap {
                     refuse_unprotected(&format!(" (bwrap exec failed: {err})"));
                     std::process::exit(1);
                 }
@@ -1335,7 +1415,19 @@ pub fn apply_sandbox(
                      Install bubblewrap: apt install -y bubblewrap"
                 );
             }
-            None if requires_read_deny && !xai_grok_sandbox::is_inside_bwrap() => {
+            None if requires_bwrap && xai_grok_sandbox::is_inside_bwrap() => {
+                if requires_hook_write_deny
+                    && let Err(e) = xai_grok_sandbox::verify_hook_write_deny_enforced()
+                {
+                    eprintln!(
+                        "error: sandbox reports bwrap but required hook write-deny \
+                         mounts are missing or writable ({e}); refusing to start \
+                         (possible __GROK_INSIDE_BWRAP spoof)"
+                    );
+                    std::process::exit(1);
+                }
+            }
+            None if requires_bwrap => {
                 refuse_unprotected("");
                 std::process::exit(1);
             }
@@ -1344,7 +1436,12 @@ pub fn apply_sandbox(
     }
     if sandbox_profile != xai_grok_sandbox::ProfileName::Off {
         #[cfg(any(target_os = "linux", target_os = "macos"))]
-        let is_custom = matches!(sandbox_profile, xai_grok_sandbox::ProfileName::Custom(_));
+        let requires_protection = {
+            let is_custom = matches!(sandbox_profile, xai_grok_sandbox::ProfileName::Custom(_));
+            let needs_hooks =
+                xai_grok_sandbox::requires_hook_write_deny(&sandbox_profile, &workspace);
+            is_custom || needs_hooks
+        };
         let mut sandbox = xai_grok_sandbox::SandboxManager::new(sandbox_profile, &workspace);
         if let Err(e) = sandbox.apply(&workspace) {
             eprintln!("warning: sandbox could not be applied: {e}");
@@ -1352,14 +1449,27 @@ pub fn apply_sandbox(
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         {
             #[cfg(target_os = "macos")]
-            let unappliable_custom = is_custom && !sandbox.is_applied();
+            let unappliable = requires_protection && !sandbox.is_applied();
             #[cfg(target_os = "linux")]
-            let unappliable_custom =
-                is_custom && !sandbox.is_applied() && !xai_grok_sandbox::is_inside_bwrap();
-            if unappliable_custom {
+            let unappliable = requires_protection
+                && !sandbox.is_applied()
+                && !xai_grok_sandbox::is_inside_bwrap();
+            if unappliable {
                 eprintln!(
-                    "error: could not apply the '{}' sandbox profile; refusing to start rather than run unsandboxed.",
+                    "error: could not apply the '{}' sandbox profile (including \
+                     direct global-hook write protection); refusing to start.",
                     sandbox.profile()
+                );
+                std::process::exit(1);
+            }
+            #[cfg(target_os = "linux")]
+            if requires_hook_write_deny
+                && xai_grok_sandbox::is_inside_bwrap()
+                && let Err(e) = xai_grok_sandbox::verify_hook_write_deny_enforced()
+            {
+                eprintln!(
+                    "error: required hook write-deny mounts not verified after apply ({e}); \
+                     refusing to start"
                 );
                 std::process::exit(1);
             }

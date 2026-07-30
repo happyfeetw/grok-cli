@@ -25,6 +25,7 @@ use xai_grok_workspace_types::rpc::code_nav::{
     CodeFindDefinitionsReq, CodeFindReferencesReq, CodeGotoDefinitionReq, CodeGotoReferencesReq,
     CodeIndexStatusReq, CodeIndexStatusResponse, CodeNavResponse,
 };
+use xai_grok_workspace_types::rpc::export_github::{ExportGithubReq, ExportGithubResponse};
 use xai_grok_workspace_types::rpc::fs::{
     FsDeleteFileReq, FsExistsData, FsExistsReq, FsListData, FsListReq, FsReadFileData,
     FsReadFileReq, FsWriteFileReq, GetFilesReq, GetFilesRes, PutFilesReq, PutFilesRes,
@@ -35,7 +36,8 @@ use xai_grok_workspace_types::rpc::git::{
     GitCollectChangesResponse, GitCommitReq, GitCurrentCommitReq, GitDiffReq, GitDiffsData,
     GitDiscardReq, GitFilesReq, GitInfoData, GitInfoReq, GitMetadataReq, GitReadFilesData,
     GitResolveRootReq, GitStageContentReq, GitStageReq, GitStashReq, GitStatusExtReq,
-    GitStatusExtResponse, GitStatusReq, GitUnstageReq, StageData, VcsKind,
+    GitStatusExtResponse, GitStatusReq, GitSyncBaseReq, GitSyncBaseResult, GitUnstageReq,
+    StageData, VcsKind,
 };
 use xai_grok_workspace_types::rpc::hunks::{
     BulkHunkActionResponse, FileSummary, HunkActionResponse, HunkAllActionReq, HunkFileActionReq,
@@ -291,6 +293,12 @@ impl WorkspaceClient {
     ) -> Result<CommitResult, WorkspaceClientError> {
         self.rpc(req).await
     }
+    pub async fn git_sync_base(
+        &self,
+        req: &GitSyncBaseReq,
+    ) -> Result<GitSyncBaseResult, WorkspaceClientError> {
+        self.rpc(req).await
+    }
     pub async fn git_checkout(&self, req: &GitCheckoutReq) -> Result<(), WorkspaceClientError> {
         self.rpc(req).await
     }
@@ -347,6 +355,12 @@ impl WorkspaceClient {
         self.rpc(req).await
     }
     pub async fn get_files(&self, req: &GetFilesReq) -> Result<GetFilesRes, WorkspaceClientError> {
+        self.rpc(req).await
+    }
+    pub async fn export_github(
+        &self,
+        req: &ExportGithubReq,
+    ) -> Result<ExportGithubResponse, WorkspaceClientError> {
         self.rpc(req).await
     }
     pub async fn fs_list(&self, req: &FsListReq) -> Result<FsListData, WorkspaceClientError> {

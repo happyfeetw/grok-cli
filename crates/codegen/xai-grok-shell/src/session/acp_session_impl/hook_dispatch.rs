@@ -9,7 +9,9 @@ pub(super) fn turn_result_to_hook_outcome(
 ) -> xai_tool_protocol::turn_hook::TurnHookOutcome {
     use xai_tool_protocol::turn_hook::TurnHookOutcome;
     match result {
-        Ok(TurnOutcome::Completed { .. }) => TurnHookOutcome::Completed,
+        Ok(TurnOutcome::Completed { .. }) | Ok(TurnOutcome::StationarityEnded { .. }) => {
+            TurnHookOutcome::Completed
+        }
         Ok(TurnOutcome::Cancelled { .. }) | Ok(TurnOutcome::MaxTurnsReached { .. }) => {
             TurnHookOutcome::Cancelled
         }
@@ -96,6 +98,7 @@ impl SessionActor {
         xai_grok_hooks::runner::RunContext {
             session_id: &self.session_info.id.0,
             workspace_root: &self.hook_resolved_workspace_root,
+            process_scope: self.tool_context.process_scope.clone(),
         }
     }
 
@@ -376,6 +379,8 @@ mod notification_hook_filter_tests {
                 block_waited: false,
                 explicitly_killed: false,
                 owner_session_id: None,
+                description: None,
+                is_backgrounded: false,
             },
             will_wake: false,
         };
