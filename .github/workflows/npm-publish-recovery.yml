@@ -1,0 +1,110 @@
+name: Publish npm from release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing GitHub Release tag to publish to npm
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: npm-publish-${{ inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Publish npm packages
+    runs-on: macos-14
+    env:
+      GH_TOKEN: ${{ github.token }}
+      PRODUCT: grok-cli
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Download existing release binaries
+        id: release
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-[1-9][0-9]*$ ]]; then
+            echo "::error::tag must use vBASE-N format"
+            exit 1
+          fi
+
+          VERSION="${TAG#v}"
+          test "$(tr -d '[:space:]' < packaging/VERSION)" = "$VERSION"
+
+          RECOVERY_ROOT="$RUNNER_TEMP/grok-cli-npm-$VERSION"
+          ASSET_DIR="$RECOVERY_ROOT/assets"
+          ARM_DIR="$RECOVERY_ROOT/arm64"
+          X64_DIR="$RECOVERY_ROOT/x64"
+          mkdir -p "$ASSET_DIR" "$ARM_DIR" "$X64_DIR"
+
+          gh release download "$TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --pattern "$PRODUCT-$VERSION-darwin-arm64.tar.gz" \
+            --pattern "$PRODUCT-$VERSION-darwin-x64.tar.gz" \
+            --dir "$ASSET_DIR"
+
+          ARM_ARCHIVE="$ASSET_DIR/$PRODUCT-$VERSION-darwin-arm64.tar.gz"
+          X64_ARCHIVE="$ASSET_DIR/$PRODUCT-$VERSION-darwin-x64.tar.gz"
+          test -f "$ARM_ARCHIVE"
+          test -f "$X64_ARCHIVE"
+
+          tar -xzf "$ARM_ARCHIVE" -C "$ARM_DIR"
+          tar -xzf "$X64_ARCHIVE" -C "$X64_DIR"
+          test -f "$ARM_DIR/grok-cli"
+          test -f "$X64_DIR/grok-cli"
+
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "GROK_DARWIN_ARM64=$ARM_DIR/grok-cli" >> "$GITHUB_ENV"
+          echo "GROK_DARWIN_X64=$X64_DIR/grok-cli" >> "$GITHUB_ENV"
+
+      - name: Verify npm authentication
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -euo pipefail
+          test -n "${NPM_TOKEN:-}"
+          npm whoami --registry https://registry.npmjs.org/
+
+      - name: Assemble and publish
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -euo pipefail
+          node packaging/scripts/assemble-npm.js
+          node packaging/scripts/publish-npm.js
+
+      - name: Verify registry versions
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          set -euo pipefail
+          for PACKAGE in \
+            @spikewang/grok-cli-darwin-arm64 \
+            @spikewang/grok-cli-darwin-x64 \
+            @spikewang/grok-cli
+          do
+            ACTUAL="$(
+              npm view "$PACKAGE@$VERSION" version \
+                --registry https://registry.npmjs.org/
+            )"
+            test "$ACTUAL" = "$VERSION"
+            echo "$PACKAGE@$ACTUAL verified"
+          done
