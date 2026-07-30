@@ -61,7 +61,7 @@ if (!token) {
 }
 
 console.log(`[publish-npm] registry=${registry}`);
-console.log(`[publish-npm] token length=${token.length} prefix=${token.slice(0, 7)}…`);
+console.log('[publish-npm] authentication token configured');
 
 const rootNpmrc = path.join(npmRoot, '.npmrc');
 fs.writeFileSync(rootNpmrc, npmrcContents(), { mode: 0o600 });

@@ -347,6 +347,8 @@ jobs:
           test -n "$ARM" && test -n "$X64"
           export GROK_DARWIN_ARM64="$ARM"
           export GROK_DARWIN_X64="$X64"
-          npm whoami --registry https://registry.npmjs.org/ || true
+          # Fail before the expensive Brotli assembly when the repository
+          # secret is expired, revoked, or lacks access to the package scope.
+          npm whoami --registry https://registry.npmjs.org/
           node packaging/scripts/assemble-npm.js
           node packaging/scripts/publish-npm.js
