@@ -38,8 +38,7 @@ function npmrcContents() {
   return lines.join('\n');
 }
 
-function run(cmd, args, cwd) {
-  console.log(`$ ${cmd} ${args.join(' ')}  (cwd=${path.relative(root, cwd)})`);
+function commandEnv() {
   const env = {
     ...process.env,
     npm_config_registry: registry,
@@ -49,10 +48,50 @@ function run(cmd, args, cwd) {
     env.NODE_AUTH_TOKEN = token;
     env.NPM_TOKEN = token;
   }
-  const res = spawnSync(cmd, args, { cwd, env, stdio: 'inherit', shell: false });
+  return env;
+}
+
+function run(cmd, args, cwd) {
+  console.log(`$ ${cmd} ${args.join(' ')}  (cwd=${path.relative(root, cwd)})`);
+  const res = spawnSync(cmd, args, {
+    cwd,
+    env: commandEnv(),
+    stdio: 'inherit',
+    shell: false,
+  });
   if (res.status !== 0) {
     process.exit(res.status ?? 1);
   }
+}
+
+function isPublished(packageName, cwd, userconfig) {
+  const spec = `@spikewang/${packageName}@${version}`;
+  const args = ['view', spec, 'version', '--registry', registry, '--userconfig', userconfig];
+  const res = spawnSync('npm', args, {
+    cwd,
+    env: commandEnv(),
+    encoding: 'utf8',
+    shell: false,
+  });
+
+  if (res.status === 0) {
+    if (res.stdout.trim() === version) {
+      console.log(`[publish-npm] ${spec} already published; skipping`);
+      return true;
+    }
+    console.error(`[publish-npm] unexpected registry response for ${spec}: ${res.stdout.trim()}`);
+    process.exit(1);
+  }
+
+  const output = `${res.stdout || ''}\n${res.stderr || ''}`;
+  if (res.status === 1 && /\bE404\b|No match found for version/.test(output)) {
+    return false;
+  }
+
+  process.stdout.write(res.stdout || '');
+  process.stderr.write(res.stderr || '');
+  console.error(`[publish-npm] could not determine whether ${spec} is already published`);
+  process.exit(res.status ?? 1);
 }
 
 if (!token) {
@@ -63,15 +102,29 @@ if (!token) {
 console.log(`[publish-npm] registry=${registry}`);
 console.log('[publish-npm] authentication token configured');
 
+const written = [];
+function cleanupNpmrcs() {
+  for (const file of written) {
+    try {
+      fs.unlinkSync(file);
+    } catch {}
+  }
+}
+process.once('exit', cleanupNpmrcs);
+
 const rootNpmrc = path.join(npmRoot, '.npmrc');
 fs.writeFileSync(rootNpmrc, npmrcContents(), { mode: 0o600 });
+written.push(rootNpmrc);
 
 // Who am I? Helps diagnose scope/permission issues without printing the token.
 run('npm', ['whoami', '--registry', registry, '--userconfig', rootNpmrc], npmRoot);
 
-const written = [rootNpmrc];
 for (const name of order) {
   const dir = path.join(npmRoot, name);
+  if (isPublished(name, dir, rootNpmrc)) {
+    continue;
+  }
+
   if (name !== 'grok-cli') {
     const br = path.join(dir, 'bin', 'grok-cli.br');
     if (!fs.existsSync(br)) {
@@ -91,10 +144,6 @@ for (const name of order) {
   );
 }
 
-for (const f of written) {
-  try {
-    fs.unlinkSync(f);
-  } catch {}
-}
+cleanupNpmrcs();
 
 console.log(`[publish-npm] published @spikewang/grok-cli@${version} (+ platform packages)`);

@@ -96,15 +96,34 @@ jobs:
           VERSION: ${{ steps.release.outputs.version }}
         run: |
           set -euo pipefail
+          VERIFY_ATTEMPTS=6
+          VERIFY_DELAY_SECONDS=10
+          ERROR_LOG="$RUNNER_TEMP/npm-view-error.log"
+
           for PACKAGE in \
             @spikewang/grok-cli-darwin-arm64 \
             @spikewang/grok-cli-darwin-x64 \
             @spikewang/grok-cli
           do
-            ACTUAL="$(
-              npm view "$PACKAGE@$VERSION" version \
-                --registry https://registry.npmjs.org/
-            )"
-            test "$ACTUAL" = "$VERSION"
+            ACTUAL=""
+            for ATTEMPT in $(seq 1 "$VERIFY_ATTEMPTS"); do
+              if ACTUAL="$(
+                npm view "$PACKAGE@$VERSION" version \
+                  --registry https://registry.npmjs.org/ \
+                  2>"$ERROR_LOG"
+              )" && test "$ACTUAL" = "$VERSION"; then
+                break
+              fi
+
+              if test "$ATTEMPT" -eq "$VERIFY_ATTEMPTS"; then
+                cat "$ERROR_LOG" >&2
+                echo "::error::$PACKAGE@$VERSION was not visible after $VERIFY_ATTEMPTS attempts"
+                exit 1
+              fi
+
+              echo "$PACKAGE@$VERSION not visible yet; retrying in ${VERIFY_DELAY_SECONDS}s"
+              sleep "$VERIFY_DELAY_SECONDS"
+            done
+
             echo "$PACKAGE@$ACTUAL verified"
           done
