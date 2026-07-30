@@ -12,11 +12,11 @@ class GrokCli < Formula
   on_macos do
     on_arm do
       url "https://github.com/happyfeetw/grok-cli/releases/download/v0.2.114-1/grok-cli-0.2.114-1-darwin-arm64.tar.gz"
-      sha256 "bef846c3ffe01be31d395dc7b6447792627882303e077d81b43a135e5ed74195"
+      sha256 "197d783053976de1a0c344dc8667e378ba5b454d345e5c31a0f9fc24b7e7fdf5"
     end
     on_intel do
       url "https://github.com/happyfeetw/grok-cli/releases/download/v0.2.114-1/grok-cli-0.2.114-1-darwin-x64.tar.gz"
-      sha256 "cc07ef31ed7eaff8ca3187a4e5815203afbaa444cab4151f1bda0a3bdbc7e814"
+      sha256 "ce91312f423e72000971ec2a88ced862bf05f9be540122adc6faf7ee5bbfb277"
     end
   end
 
