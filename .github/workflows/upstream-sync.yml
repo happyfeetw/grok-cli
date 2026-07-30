@@ -52,10 +52,12 @@ jobs:
             git remote set-url upstream "$UPSTREAM_URL"
           git fetch --no-tags upstream main
           gh label create upstream-sync \
+            --repo "$REPOSITORY" \
             --color "1D76DB" \
             --description "Automated upstream synchronization" \
             --force
           gh label create needs-codex \
+            --repo "$REPOSITORY" \
             --color "D93F0B" \
             --description "Requires local Codex conflict resolution" \
             --force
@@ -125,6 +127,7 @@ jobs:
 
                 ISSUE_NUMBER="$(
                   gh issue list \
+                    --repo "$REPOSITORY" \
                     --state open \
                     --label upstream-sync \
                     --search "${UPSTREAM_SHA} in:title" \
@@ -148,12 +151,14 @@ jobs:
                     echo "It must not run Cargo or build locally."
                   } > upstream-sync-issue.md
                   gh issue create \
+                    --repo "$REPOSITORY" \
                     --title "[upstream-sync] conflict at ${UPSTREAM_SHA}" \
                     --label upstream-sync \
                     --label needs-codex \
                     --body-file upstream-sync-issue.md
                 else
                   gh issue comment "$ISSUE_NUMBER" \
+                    --repo "$REPOSITORY" \
                     --body "Conflict reproduced by ${RUN_URL}. Upstream remains pinned to \`${UPSTREAM_SHA}\`."
                 fi
 
@@ -341,11 +346,13 @@ jobs:
             echo "::warning::main was promoted, but candidate branch cleanup failed"
 
           gh workflow run release-macos.yml \
+            --repo "$GITHUB_REPOSITORY" \
             --ref main \
             -f "tag=v${VERSION}"
 
           ISSUE_NUMBER="$(
             gh issue list \
+              --repo "$GITHUB_REPOSITORY" \
               --state open \
               --label upstream-sync \
               --search "${UPSTREAM_SHA} in:title" \
@@ -354,5 +361,6 @@ jobs:
           )"
           if [[ -n "$ISSUE_NUMBER" ]]; then
             gh issue close "$ISSUE_NUMBER" \
+              --repo "$GITHUB_REPOSITORY" \
               --comment "Resolved, promoted to \`main\`, and release dispatch accepted by ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}."
           fi
