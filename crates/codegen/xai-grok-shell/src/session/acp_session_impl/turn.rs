@@ -312,13 +312,7 @@ impl SessionActor {
                 .handle_direct_bash_command(prompt_id, bash_command, &prompt_blocks)
                 .await;
         }
-        let slash_skills = self
-            .agent
-            .borrow()
-            .tool_bridge()
-            .clone()
-            .slash_skills()
-            .await;
+        let slash_skills = self.slash_skills_for_resolve().await;
         let skill_rewrite = if crate::session::is_cursor_user_template(
             &self.agent.borrow().definition().user_message_template,
         ) {
@@ -837,6 +831,7 @@ impl SessionActor {
         .await;
         let turn_scope_guard =
             TurnSubagentScopeGuard::new(self.current_prompt_id.clone(), prompt_id.to_string());
+        self.open_subagent_spawn_admission();
         let turn_model_id = self.current_model_id().await;
         let doom_event_model = turn_model_id.clone();
         let turn_timer = std::time::Instant::now();
@@ -1157,7 +1152,7 @@ impl SessionActor {
             result,
             Ok(TurnOutcome::Cancelled { .. }) | Ok(TurnOutcome::MaxTurnsReached { .. })
         ) {
-            self.cancel_running_turn_subagents();
+            self.cancel_running_turn_subagents(prompt_id);
         }
         self.flush_to_disk().await;
         self.file_state_tracker
@@ -2314,6 +2309,7 @@ impl SessionActor {
                 );
             }
             self.record_response_token_usage(&response, Some(model_duration_ms));
+            let response_completed = self.response_completed_update(&response);
             if let Some(pt) = prompt_timing.take() {
                 let mcp_count = self.mcp_state.lock().await.configs.len() as u32;
                 let mcp_tools = self
@@ -2397,6 +2393,7 @@ impl SessionActor {
                 )
                 .await;
             }
+            self.send_buffered_xai_update(response_completed).await;
             if tool_calls.is_empty() {
                 if !schema_ok
                     && !turn_refused

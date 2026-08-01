@@ -122,7 +122,7 @@ impl AgentView {
                     ]
                 } else {
                     vec![
-                        HintItem::new(key!(Enter), "approve"),
+                        HintItem::new(key!('a'), "approve"),
                         HintItem::new(key!(Tab), "plan"),
                         HintItem::new(key!(Esc), "back"),
                     ]
@@ -698,6 +698,7 @@ impl AgentView {
             voice_interim,
             esc_owned_before_agent,
         } = app_params;
+        self.scrollback.begin_frame();
         self.in_dashboard_overlay = in_dashboard_overlay;
         let super::BannerSlotParams {
             height: banner_height,
