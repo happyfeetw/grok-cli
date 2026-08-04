@@ -14,6 +14,9 @@ use tokio_util::sync::CancellationToken;
 mod enrichment;
 #[path = "manager/lock.rs"]
 pub(super) mod lock;
+#[path = "manager/remedy.rs"]
+mod remedy;
+pub(crate) use remedy::{AuthRemedy, SilentRefresh};
 #[path = "manager/sleep_gate.rs"]
 mod sleep_gate;
 
@@ -64,8 +67,8 @@ pub(crate) enum RefreshReason {
 pub(crate) const AUTH_LOCK_TIMEOUT: StdDuration = StdDuration::from_secs(10);
 
 /// Lock timeout for `refresh_chain`, held across the IdP call to prevent
-/// refresh-token reuse. Must exceed the external-auth refresh timeout
-/// (`EXTERNAL_AUTH_REFRESH_TIMEOUT`, 5 s) so followers wait rather than retry.
+/// refresh-token reuse. Must exceed the external-auth refresh budget
+/// (a single 7s run) so followers wait rather than retry.
 const REFRESH_LOCK_TIMEOUT: StdDuration = StdDuration::from_secs(45);
 
 /// Long poll interval used by the proactive refresh task when no
@@ -977,7 +980,7 @@ impl AuthManager {
     /// Used by [`ModelsManager`] to trigger model catalog recovery
     /// after sleep/wake, bypassing the FSEvents file watcher which
     /// can silently die on macOS after resume.
-    pub fn refresh_notifier(&self) -> Arc<tokio::sync::Notify> {
+    pub(crate) fn refresh_notifier(&self) -> Arc<tokio::sync::Notify> {
         self.refresh_notify.clone()
     }
 
@@ -997,7 +1000,7 @@ impl AuthManager {
     /// to the primary refresh path instead of driving their own
     /// `ServerRejected` recovery, avoiding concurrent refresh storms that
     /// amplify 401 bursts at CCP.
-    pub async fn wait_for_token_refresh(&self, timeout: std::time::Duration) -> bool {
+    pub(crate) async fn wait_for_token_refresh(&self, timeout: std::time::Duration) -> bool {
         let pre_key = self.current().map(|a| a.key.clone());
         tokio::select! {
             _ = self.refresh_notify.notified() => {}
@@ -1362,6 +1365,9 @@ impl AuthManager {
         // Snapshot inner ONCE for dispatch atomicity (closes a TOCTOU
         // where a concurrent `clear()` raced `token_type()` + `inner.read()`).
         let snapshot: Option<GrokAuth> = self.with_inner_read(|inner| inner.cloned());
+        // Kept alongside `snapshot`, which the grace arm below consumes: the
+        // devbox arms still need to name the credential they gave up on.
+        let snapshot_key: Option<String> = snapshot.as_ref().map(|a| a.key.clone());
         let token_type = TokenType::from_auth(snapshot.as_ref());
         tracing::Span::current().record("token_type", tracing::field::debug(token_type));
 
@@ -1394,7 +1400,7 @@ impl AuthManager {
             // preferred_method=api_key forbids automatic OIDC mint.
             if !self.grok_com_config.blocks_automatic_oidc()
                 && self.is_devbox_environment()
-                && let Ok(auth) = self.try_devbox_recovery().await
+                && let Ok(auth) = self.try_devbox_recovery(snapshot_key.as_deref()).await
             {
                 return Ok(auth);
             }
@@ -1469,7 +1475,7 @@ impl AuthManager {
         if result.is_err()
             && !self.grok_com_config.blocks_automatic_oidc()
             && self.is_devbox_environment()
-            && let Ok(auth) = self.try_devbox_recovery().await
+            && let Ok(auth) = self.try_devbox_recovery(snapshot_key.as_deref()).await
         {
             return Ok(auth);
         }
@@ -1500,7 +1506,15 @@ impl AuthManager {
     ///
     /// Fail-closed under `preferred_method=api_key` (no automatic OIDC mint),
     /// including direct callers such as sampler 401 recovery.
-    pub(crate) async fn try_devbox_recovery(self: &Arc<Self>) -> Result<GrokAuth, AuthError> {
+    ///
+    /// `unusable` is the credential the caller has already established cannot
+    /// work — the bearer the server rejected, or the snapshot that failed to
+    /// refresh. It is what makes the wait-on-the-lock double-check below mean
+    /// "somebody else fixed this" instead of "the dead token is still here".
+    pub(crate) async fn try_devbox_recovery(
+        self: &Arc<Self>,
+        unusable: Option<&str>,
+    ) -> Result<GrokAuth, AuthError> {
         if self.grok_com_config.blocks_automatic_oidc() {
             tracing::debug!(
                 "auth: devbox recovery skipped (preferred_method=api_key blocks automatic OIDC)"
@@ -1515,8 +1529,15 @@ impl AuthManager {
 
         let _guard = self.refresh_lock.lock().await;
 
-        // Double-check: another task may have recovered while we waited.
-        if let Some(auth) = self.current() {
+        // Double-check: another task may have recovered while we waited. Only
+        // a credential that is not the caller's `unusable` one counts. Without
+        // that filter a 401 on a still-locally-valid bearer reports recovery
+        // with the very token the server just rejected, and the caller
+        // resubmits it until its retry budget runs out.
+        if let Some(auth) = self
+            .current()
+            .filter(|auth| unusable != Some(auth.key.as_str()))
+        {
             return Ok(auth);
         }
 
@@ -2169,10 +2190,8 @@ impl AuthManager {
     /// decision.
     pub(crate) fn requires_manual_reauth(&self) -> bool {
         use crate::auth::error::RefreshTokenError;
-        // Sticky IdP rejection of the credential a refresh would send:
-        // no retry can fix it.
         if let Some(AuthError::Refresh(RefreshTokenError::Permanent(e))) = self.permanent_failure()
-            && e.reason.is_sticky()
+            && e.reason.blocks_unattended_retry()
         {
             return true;
         }
@@ -2188,6 +2207,11 @@ impl AuthManager {
             .read_disk_auth_silent()
             .is_some_and(|a| a.refresh_token.is_some());
         !(mem_refreshable || disk_refreshable)
+    }
+
+    fn is_external_provider_refresh_authority(&self) -> bool {
+        self.grok_com_config.auth_provider_command.is_some()
+            && self.token_type() == TokenType::ExternalBinary
     }
 
     /// `true` iff a [`TokenRefresher`] is wired in. `false` for static-key
@@ -2678,7 +2702,7 @@ impl AuthManager {
     }
 
     /// Set the process model key (empty clears). Not for session tokens.
-    pub fn set_process_static_api_key(&self, key: Option<String>) {
+    pub(crate) fn set_process_static_api_key(&self, key: Option<String>) {
         let key = key.map(|k| k.trim().to_string()).filter(|k| !k.is_empty());
         *self.process_static_api_key.write() = key;
     }

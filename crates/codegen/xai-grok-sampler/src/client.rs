@@ -31,6 +31,7 @@ use xai_grok_sampling_types::{
 
 use crate::attribution::bearer_tail_fragment;
 use crate::config::{AuthScheme, OriginClientInfo, SamplerConfig};
+use crate::events::SamplingErrorInfo;
 
 // Re-export ApiBackend from the shared types crate for downstream callers.
 pub use xai_grok_sampling_types::ApiBackend;
@@ -2056,16 +2057,22 @@ impl SamplingClient {
         };
         result
             .map(|(response, _metrics)| response)
-            .map_err(|info| SamplingError::Api {
-                status: info
-                    .status_code
-                    .and_then(|c| reqwest::StatusCode::from_u16(c).ok())
-                    .unwrap_or(reqwest::StatusCode::INTERNAL_SERVER_ERROR),
-                message: info.message,
-                model_metadata: info.model_metadata,
-                retry_after_secs: info.retry_after_secs,
-                should_retry: None,
-            })
+            .map_err(stream_collect_error)
+    }
+}
+
+/// Rebuild `Api` from stream-collected info, preserving status,
+/// `Retry-After`, and `x-should-retry` (kind is lost on this path).
+fn stream_collect_error(info: SamplingErrorInfo) -> SamplingError {
+    SamplingError::Api {
+        status: info
+            .status_code
+            .and_then(|c| reqwest::StatusCode::from_u16(c).ok())
+            .unwrap_or(reqwest::StatusCode::INTERNAL_SERVER_ERROR),
+        message: info.message,
+        model_metadata: info.model_metadata,
+        retry_after_secs: info.retry_after_secs,
+        should_retry: info.should_retry,
     }
 }
 
@@ -2074,6 +2081,45 @@ mod tests {
     use super::*;
     use indexmap::IndexMap;
     use xai_grok_sampling_types::types::ChatRequestMessage;
+
+    #[test]
+    fn stream_collect_error_preserves_should_retry() {
+        let info = SamplingErrorInfo {
+            kind: crate::events::SamplingErrorKind::Api,
+            status_code: Some(529),
+            message: "Overloaded".into(),
+            is_retryable: true,
+            retry_after_secs: Some(3),
+            should_retry: Some(false),
+            model_metadata: None,
+            empty_response_context: None,
+            doom_loop_triggers: None,
+            doom_loop_aborted_at_chunk: None,
+            credential: xai_grok_sampling_types::SentCredential::Unknown,
+        };
+        // SamplingError is not PartialEq (it carries reqwest/serde errors),
+        // so destructure once and compare all fields in a single assert.
+        let SamplingError::Api {
+            status,
+            message,
+            model_metadata,
+            retry_after_secs,
+            should_retry,
+        } = stream_collect_error(info)
+        else {
+            panic!("expected Api");
+        };
+        assert_eq!(
+            (
+                status.as_u16(),
+                message.as_str(),
+                model_metadata.is_none(),
+                retry_after_secs,
+                should_retry,
+            ),
+            (529, "Overloaded", true, Some(3), Some(false)),
+        );
+    }
 
     fn minimal_config() -> SamplerConfig {
         SamplerConfig {

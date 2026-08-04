@@ -340,7 +340,7 @@ impl SubagentSpawnContext {
     /// catalog used to pick the subagent's `SamplerConfig`); user TOML and
     /// GB global tiers are sourced from the parent's snapshot captured at
     /// spawn-context build time.
-    pub fn resolve_auto_compact_threshold_percent(&self, subagent_model_id: &str) -> u8 {
+    pub(crate) fn resolve_auto_compact_threshold_percent(&self, subagent_model_id: &str) -> u8 {
         let gb_per_model =
             crate::agent::config::find_model_by_id(&self.available_models, subagent_model_id)
                 .and_then(|e| e.info.auto_compact_threshold_percent);
@@ -362,7 +362,7 @@ impl SubagentSpawnContext {
         }
     }
     /// Subagent verbatim-input flag, mirroring `Config::resolve_compaction_verbatim_input` (env > config > remote settings > default `true`).
-    pub fn resolve_compaction_verbatim_input(&self) -> bool {
+    pub(crate) fn resolve_compaction_verbatim_input(&self) -> bool {
         crate::agent::config::BoolFlag::env("GROK_COMPACTION_VERBATIM_INPUT")
             .config(
                 self.agent_config
@@ -378,7 +378,9 @@ impl SubagentSpawnContext {
             .resolve()
             .value
     }
-    pub fn resolve_compaction_tool_choice(&self) -> crate::util::config::CompactionToolChoice {
+    pub(crate) fn resolve_compaction_tool_choice(
+        &self,
+    ) -> crate::util::config::CompactionToolChoice {
         crate::util::config::resolve_compaction_tool_choice_from(
             crate::agent::config::env_string(crate::util::config::ENV_COMPACTION_TOOL_CHOICE)
                 .as_deref(),
@@ -395,7 +397,7 @@ impl SubagentSpawnContext {
     /// (env > config > remote settings > default). Default `false` so it ships dark;
     /// `managed_config.toml` `[features] subagent_worktree_snapshot` is the
     /// per-deployment rollout lever.
-    pub fn resolve_subagent_worktree_snapshot_enabled(&self) -> bool {
+    pub(crate) fn resolve_subagent_worktree_snapshot_enabled(&self) -> bool {
         crate::agent::config::BoolFlag::env("GROK_SUBAGENT_WORKTREE_SNAPSHOT")
             .config(
                 self.agent_config
@@ -416,7 +418,7 @@ impl SubagentSpawnContext {
     /// parent (requirements/env/user/managed from disk; remote from the
     /// parent's snapshot) and follows the session into subagents. Bash stays
     /// on tool defaults, as before that knob existed.
-    pub fn resolve_tool_params_json(
+    pub(crate) fn resolve_tool_params_json(
         &self,
     ) -> crate::session::agent_rebuild::ResolvedToolParamsJson {
         let params = crate::util::config::resolve_ask_user_question_params_from_disk(
@@ -2268,7 +2270,7 @@ pub(crate) struct SubagentMeta {
 /// locally. Schema is versioned for forward compatibility.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct SubagentSessionMetadata {
+pub(crate) struct SubagentSessionMetadata {
     pub schema_version: u32,
     pub session_id: String,
     pub session_kind: String,
@@ -2327,7 +2329,7 @@ impl SubagentSessionMetadata {
     /// Current schema version.
     pub const SCHEMA_VERSION: u32 = 1;
     /// Build from a `SubagentMeta` + additional runtime context.
-    pub fn from_meta(
+    pub(crate) fn from_meta(
         meta: &SubagentMeta,
         model_id: Option<&str>,
         cwd: Option<&str>,
