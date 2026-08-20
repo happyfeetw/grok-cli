@@ -5,6 +5,11 @@ on:
   schedule:
     - cron: "17 19 * * *"
   workflow_dispatch:
+    inputs:
+      upstream_sha:
+        description: "Optional full upstream SHA to resume a pinned candidate"
+        required: false
+        type: string
   push:
     branches:
       - "automation/upstream-sync-*"
@@ -31,17 +36,32 @@ jobs:
       upstream_sha: ${{ steps.sync.outputs.upstream_sha }}
       version: ${{ steps.sync.outputs.version }}
     steps:
+      - name: Create upstream-sync app token
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ vars.UPSTREAM_SYNC_APP_CLIENT_ID }}
+          private-key: ${{ secrets.UPSTREAM_SYNC_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: grok-cli
+          permission-actions: write
+          permission-contents: write
+          permission-issues: write
+          permission-workflows: write
+
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          token: ${{ steps.app-token.outputs.token }}
 
       - name: Fetch upstream once and prepare candidate
         id: sync
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
           REPOSITORY: ${{ github.repository }}
           EVENT_NAME: ${{ github.event_name }}
           REF_NAME: ${{ github.ref_name }}
+          REQUESTED_UPSTREAM_SHA: ${{ inputs.upstream_sha }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -euo pipefail
@@ -81,7 +101,23 @@ jobs:
               exit 1
             fi
           else
-            UPSTREAM_SHA="$(git rev-parse upstream/main)"
+            if [[ -n "$REQUESTED_UPSTREAM_SHA" ]]; then
+              UPSTREAM_SHA="$REQUESTED_UPSTREAM_SHA"
+              if [[ ! "$UPSTREAM_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+                echo "::error::workflow_dispatch upstream_sha must be a full 40-character lowercase SHA"
+                exit 1
+              fi
+              git cat-file -e "${UPSTREAM_SHA}^{commit}" || {
+                echo "::error::requested upstream commit does not exist after fetching upstream/main"
+                exit 1
+              }
+              git merge-base --is-ancestor "$UPSTREAM_SHA" upstream/main || {
+                echo "::error::requested upstream commit is not an ancestor of upstream/main"
+                exit 1
+              }
+            else
+              UPSTREAM_SHA="$(git rev-parse upstream/main)"
+            fi
             BRANCH="automation/upstream-sync-${UPSTREAM_SHA}"
 
             if git merge-base --is-ancestor "$UPSTREAM_SHA" HEAD; then
@@ -315,16 +351,31 @@ jobs:
     if: needs.prepare.outputs.status == 'ready'
     runs-on: ubuntu-22.04
     env:
-      GH_TOKEN: ${{ github.token }}
       BRANCH: ${{ needs.prepare.outputs.branch }}
       UPSTREAM_SHA: ${{ needs.prepare.outputs.upstream_sha }}
       VERSION: ${{ needs.prepare.outputs.version }}
     steps:
+      - name: Create upstream-sync app token
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ vars.UPSTREAM_SYNC_APP_CLIENT_ID }}
+          private-key: ${{ secrets.UPSTREAM_SYNC_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: grok-cli
+          permission-actions: write
+          permission-contents: write
+          permission-issues: write
+          permission-workflows: write
+
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          token: ${{ steps.app-token.outputs.token }}
 
       - name: Promote the validated candidate
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
           set -euo pipefail
           git fetch origin main
