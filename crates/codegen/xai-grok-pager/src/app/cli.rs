@@ -111,6 +111,14 @@ See ~/.grok/README.md for more information.
         /// Switch to the enterprise release channel.
         #[arg(long, conflicts_with_all = ["alpha", "stable"], hide = true)]
         enterprise: bool,
+        /// Internal: what spawned this `grok update` (`user_command`,
+        /// `auto_background`, `leader_converge`). Hidden.
+        #[arg(long, hide = true)]
+        trigger: Option<String>,
+        /// Internal compat alias for `--trigger=auto_background` (older
+        /// parents still spawn children with it).
+        #[arg(long, hide = true)]
+        auto: bool,
     },
     /// Print version information
     #[command(visible_alias = "v")]
@@ -127,6 +135,9 @@ See ~/.grok/README.md for more information.
     },
     /// Manage git worktrees
     Worktree(crate::worktree_cmd::WorktreeArgs),
+    /// Show what the grok home (~/.grok) uses on disk
+    #[command(name = "du", visible_alias = "disk-usage")]
+    DiskUsage(crate::disk_usage_cmd::DiskUsageArgs),
     /// Expose this workspace to the Computer Hub (via the leader).
     ///
     /// Disabled by default and enabled server-side per account; set
@@ -399,7 +410,7 @@ pub struct LeaderArgs {
 #[derive(Debug, Clone, Parser)]
 #[command(
     name = "grok-cli",
-    version = env!("VERSION_WITH_COMMIT"),
+    version = xai_grok_version::full_version(),
     about = "grok-cli — community fork of Grok Build (system-proxy + packaging)",
     disable_version_flag = true,
     next_display_order = None,
@@ -594,13 +605,18 @@ pub struct PagerArgs {
     #[arg(long = "fork-session")]
     pub fork_session: bool,
     /// Start the session in a new git worktree, optionally named.
+    /// With `--resume` of a remote session, pass `--restore-code` to apply
+    /// the snapshot codebase (conversation is restored either way).
+    /// Headless (`-p`) does not create a worktree from this flag.
     #[arg(short = 'w', long = "worktree", num_args = 0..= 1, default_missing_value = "")]
     pub worktree: Option<String>,
     /// Branch, tag, or commit to base the worktree on (with `--worktree`).
     /// Defaults to the current HEAD of the source checkout when omitted.
     #[arg(long = "worktree-ref", visible_alias = "ref", requires = "worktree")]
     pub worktree_ref: Option<String>,
-    /// Check out the original session's commit when resuming.
+    /// Restore the original session's repository snapshot when resuming.
+    /// Remote sessions require `--worktree` (never checks out into the current
+    /// directory). Without this flag, resume restores conversation only.
     #[arg(long = "restore-code", requires = "resume_session")]
     pub restore_code: bool,
     /// Disable plan mode.
@@ -638,11 +654,19 @@ pub struct PagerArgs {
     /// Disable structured question prompts from the agent.
     #[arg(long = "no-ask-user", hide = true)]
     pub no_ask_user: bool,
-    /// Enable cross-session memory.
-    #[arg(long = "experimental-memory", conflicts_with = "no_memory")]
+    /// Legacy compatibility flag for enabling cross-session memory.
+    #[arg(
+        long = "experimental-memory",
+        conflicts_with = "no_memory",
+        hide = true
+    )]
     pub experimental_memory: bool,
-    /// Disable cross-session memory for this session.
-    #[arg(long = "no-memory", conflicts_with = "experimental_memory")]
+    /// Legacy compatibility flag for disabling cross-session memory.
+    #[arg(
+        long = "no-memory",
+        conflicts_with = "experimental_memory",
+        hide = true
+    )]
     pub no_memory: bool,
     /// Agent name or definition file path.
     #[arg(long = "agent", value_name = "NAME")]
@@ -812,6 +836,24 @@ fn strip_cur_dir(path: PathBuf) -> PathBuf {
         .collect()
 }
 impl PagerArgs {
+    pub(crate) fn memory_enabled_override(&self) -> Option<bool> {
+        if self.experimental_memory {
+            Some(true)
+        } else if self.no_memory {
+            Some(false)
+        } else {
+            None
+        }
+    }
+    pub(crate) fn memory_override_flag(&self) -> Option<&'static str> {
+        if self.experimental_memory {
+            Some("--experimental-memory")
+        } else if self.no_memory {
+            Some("--no-memory")
+        } else {
+            None
+        }
+    }
     /// Parse CLI arguments without applying side effects.
     pub fn parse_cli() -> Self {
         let bin_name = std::env::args()

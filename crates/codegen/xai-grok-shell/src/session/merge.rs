@@ -56,6 +56,13 @@ pub struct MergedSession {
     pub git_remotes: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_workspace_dir: Option<String>,
+    /// Per-turn dashboard summary from `summary.json` (local sessions only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_turn_summary: Option<String>,
+    /// Latest session recap from `summary.json` (local sessions only). Distinct
+    /// from `last_turn_summary`; shown on `/resume` / `/session-info`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_recap: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session_kind: Option<String>,
 }
@@ -222,6 +229,23 @@ pub(crate) async fn fetch_lanes(
         }
         local.retain(|s| Path::new(&s.info.cwd).is_absolute());
     }
+    // `grok --resume <uuid>` resolves across every cwd. `/resume` search was
+    // cwd-scoped, so pasting that same id showed nothing. Promote an exact
+    // UUID hit from any local directory into the lane before merge filters.
+    if let Some(id) = query
+        .map(str::trim)
+        .filter(|q| uuid::Uuid::try_parse(q).is_ok())
+        && !local.iter().any(|s| s.info.id.0.as_ref() == id)
+    {
+        let id = id.to_string();
+        if let Ok(Some(summary)) = tokio::task::spawn_blocking(move || {
+            crate::session::persistence::find_summary_by_session_id(&id)
+        })
+        .await
+        {
+            local.push(summary);
+        }
+    }
     SessionLanes {
         local,
         remote,
@@ -285,6 +309,8 @@ pub fn merge(
                 git_root_dir: s.git_root_dir,
                 git_remotes: s.git_remotes,
                 source_workspace_dir: s.source_workspace_dir,
+                last_turn_summary: s.last_turn_summary,
+                last_recap: s.last_recap,
                 session_kind: s.session_kind,
             },
         );
@@ -343,6 +369,8 @@ pub fn merge(
                 git_root_dir: local.git_root_dir,
                 git_remotes: local.git_remotes,
                 source_workspace_dir: local.source_workspace_dir,
+                last_turn_summary: local.last_turn_summary,
+                last_recap: local.last_recap,
                 session_kind: local.session_kind,
             },
         );
@@ -473,6 +501,9 @@ mod tests {
             agent_name: None,
             sandbox_profile: None,
             reasoning_effort: None,
+            last_turn_summary: None,
+            last_turn_summary_prompt_id: None,
+            last_recap: None,
         }
     }
 
@@ -609,6 +640,53 @@ mod tests {
         assert_eq!(merged[0].source, "local");
     }
 
+    /// `last_turn_summary` rides the session-list wire from local
+    /// `summary.json`, both for local-only rows and inherited onto a merged
+    /// "both" row (the registry has no copy of it).
+    #[test]
+    fn last_turn_summary_carried_from_local_summary() {
+        let mut s = make_summary("s1", "title", "2026-03-01T00:00:00Z");
+        s.last_turn_summary = Some("Fixed the parser".into());
+        let merged = merge(Vec::new(), vec![s], None, &[], 20);
+        assert_eq!(
+            merged[0].last_turn_summary.as_deref(),
+            Some("Fixed the parser")
+        );
+
+        let mut s = make_summary("s1", "title", "2026-03-01T00:00:00Z");
+        s.last_turn_summary = Some("Fixed the parser".into());
+        let remote = vec![make_remote("s1", "remote title", "2026-03-01T00:00:00Z")];
+        let merged = merge(remote, vec![s], None, &[], 20);
+        assert_eq!(merged[0].source, "both");
+        assert_eq!(
+            merged[0].last_turn_summary.as_deref(),
+            Some("Fixed the parser")
+        );
+    }
+
+    /// `last_recap` rides the session-list wire from local `summary.json`,
+    /// both for local-only rows and inherited onto a merged "both" row.
+    #[test]
+    fn last_recap_carried_from_local_summary() {
+        let mut s = make_summary("s1", "title", "2026-03-01T00:00:00Z");
+        s.last_recap = Some("Where we left off: auth refactor".into());
+        let merged = merge(Vec::new(), vec![s], None, &[], 20);
+        assert_eq!(
+            merged[0].last_recap.as_deref(),
+            Some("Where we left off: auth refactor")
+        );
+
+        let mut s = make_summary("s1", "title", "2026-03-01T00:00:00Z");
+        s.last_recap = Some("Where we left off: auth refactor".into());
+        let remote = vec![make_remote("s1", "remote title", "2026-03-01T00:00:00Z")];
+        let merged = merge(remote, vec![s], None, &[], 20);
+        assert_eq!(merged[0].source, "both");
+        assert_eq!(
+            merged[0].last_recap.as_deref(),
+            Some("Where we left off: auth refactor")
+        );
+    }
+
     #[test]
     fn sorted_by_updated_at_descending() {
         let local = vec![
@@ -704,6 +782,32 @@ mod tests {
             .collect();
         let merged = merge(Vec::new(), local, None, &[], 3);
         assert_eq!(merged.len(), 3);
+    }
+
+    #[test]
+    fn search_matches_session_id_substring() {
+        let id = "019f870d-6976-7d73-a12a-52e9d4aebcd4";
+        let local = vec![
+            make_summary(id, "unrelated title", "2026-03-01T00:00:00Z"),
+            make_summary(
+                "019f9999-0000-7000-8000-000000000001",
+                "other",
+                "2026-03-01T00:00:00Z",
+            ),
+        ];
+        let merged = merge(Vec::new(), local, Some(id), &[], 20);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].session_id, id);
+
+        let prefix = merge(
+            Vec::new(),
+            vec![make_summary(id, "unrelated title", "2026-03-01T00:00:00Z")],
+            Some("019f870d"),
+            &[],
+            20,
+        );
+        assert_eq!(prefix.len(), 1);
+        assert_eq!(prefix[0].session_id, id);
     }
 
     #[test]
@@ -1201,6 +1305,8 @@ mod tests {
             git_root_dir: None,
             git_remotes: Vec::new(),
             source_workspace_dir: None,
+            last_turn_summary: None,
+            last_recap: None,
             session_kind: None,
         }
     }

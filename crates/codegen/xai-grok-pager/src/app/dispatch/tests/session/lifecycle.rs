@@ -1,5 +1,6 @@
 //! Tests for session create, exit, trust, startup actions, worktree creation, and cloud lifecycle.
 use super::*;
+use crate::app::dispatch::session::lifecycle::dispatch_accept_consent;
 /// Simulate a release-stamped build so folder-trust is active (a local/dev
 /// build auto-trusts and persists nothing). Mirrors this module's raw env idiom.
 fn simulate_release_build() {
@@ -338,6 +339,47 @@ fn worktree_session_created_sets_session_and_cwd() {
     assert_eq!(app.agents[&id].session.cwd, session_cwd);
     assert_eq!(app.agents[&id].scrollback.len(), 1);
     assert!(app.agents[&id].session.state.is_idle());
+}
+#[test]
+fn worktree_session_created_clears_sticky_branch_from_main_repo() {
+    let mut app = test_app_git();
+    dispatch(
+        Action::NewWorktreeSession {
+            load_session_id: None,
+            label: None,
+            git_ref: None,
+        },
+        &mut app,
+    );
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.current_branch = Some("main-random".into());
+        agent.main_repo = Some("~/old-main".into());
+        agent.is_worktree = false;
+    }
+    let worktree_path = PathBuf::from("/tmp/grok-worktrees/pager-sticky");
+    let session_cwd = worktree_path.clone();
+    dispatch(
+        Action::TaskComplete(TaskResult::WorktreeSessionCreated {
+            agent_id: id,
+            session_id: acp::SessionId::new("wt-sticky-1"),
+            worktree_path,
+            session_cwd: session_cwd.clone(),
+            models: None,
+            scheduler_background_loops: None,
+        }),
+        &mut app,
+    );
+    let agent = &app.agents[&id];
+    assert!(
+        agent.current_branch.is_none(),
+        "sticky main-repo branch must not survive the worktree cwd switch"
+    );
+    assert!(agent.main_repo.is_none());
+    assert!(agent.is_worktree);
+    assert!(agent.session.is_worktree);
+    assert_eq!(agent.session.cwd, session_cwd);
 }
 #[test]
 fn worktree_session_preserves_subdirectory_offset() {
@@ -1118,6 +1160,170 @@ fn session_startup_allowed_requires_auth_and_trust() {
         "both pending must block session startup",
     );
 }
+fn painted_notice(id: &str, version: i32) -> crate::app::consent::ConsentState {
+    use crate::app::consent::{ConsentLegibility, ConsentNotice, ConsentSegment, ConsentState};
+    ConsentState::Pending {
+        notice: ConsentNotice {
+            id: id.to_string(),
+            version,
+            title: "Updated terms".to_string(),
+            segments: vec![ConsentSegment::Text("Review them.".to_string())],
+            links: Vec::new(),
+            accept_label: "Got it".to_string(),
+        },
+        legibility: ConsentLegibility::Painted,
+        painted_at: Some(std::time::Instant::now()),
+    }
+}
+/// An unanswered notice must not let a buffered `a` reach the composer.
+#[test]
+fn session_startup_and_typeahead_require_consent() {
+    let mut app = test_app();
+    assert!(app.session_startup_allowed());
+    assert!(app.ready_for_startup_typeahead());
+    app.consent_state = painted_notice("tos-2026", 1);
+    assert!(
+        !app.session_startup_allowed(),
+        "a pending notice must block session startup",
+    );
+    assert!(
+        !app.ready_for_startup_typeahead(),
+        "keys typed before the notice must not be replayed into it",
+    );
+}
+/// An acceptance must never cover text that did not reach the screen, so the renderer's verdict
+/// gates the dispatch, not just the key.
+#[test]
+fn accept_is_refused_until_the_notice_paints() {
+    use crate::app::consent::{ConsentLegibility, ConsentState};
+    let mut app = test_app();
+    app.consent_state = painted_notice("tos-2026", 1);
+    if let ConsentState::Pending { legibility, .. } = &mut app.consent_state {
+        *legibility = ConsentLegibility::Illegible;
+    }
+    let effects = dispatch_accept_consent(&mut app);
+    assert!(effects.is_empty());
+    assert!(
+        matches!(app.consent_state, ConsentState::Pending { .. }),
+        "an unread notice must stay pending",
+    );
+}
+#[test]
+fn accepting_records_the_answer_and_replays_deferred_startup() {
+    use crate::app::consent::ConsentState;
+    let mut app = test_app();
+    app.account_email = Some("user@example.com".to_string());
+    app.consent_state = painted_notice("tos-2026", 3);
+    app.deferred_startup.session =
+        Some(crate::app::session_startup::DeferredSessionStartup::Load {
+            session_id: "deferred-session".into(),
+            session_cwd: None,
+            chat_kind: false,
+        });
+    let effects = dispatch_accept_consent(&mut app);
+    assert!(matches!(app.consent_state, ConsentState::Done));
+    assert_eq!(
+        app.consent_answered,
+        Some(("tos-2026".to_string(), 3)),
+        "the answer must hold for this run even if the write is slow",
+    );
+    assert!(effects.iter().any(|e| matches!(
+        e,
+        Effect::PersistConsentAnswer { account, notice_id, version, acked }
+            if account.as_deref() == Some("user@example.com")
+                && notice_id == "tos-2026"
+                && *version == 3
+                && !acked
+    )));
+    assert!(
+        effects
+            .iter()
+            .any(|e| matches!(e, Effect::RecordConsentUpstream { .. })),
+    );
+    assert!(
+        effects
+            .iter()
+            .any(|e| matches!(e, Effect::LoadSession { .. })),
+        "deferred startup must replay once the notice is answered",
+    );
+    assert!(app.deferred_startup.session.is_none());
+}
+/// An api key carries no email, so an answer written under it would be filed against nobody and
+/// would overwrite the answer of whoever signed in on this machine. Both writes have to skip it.
+#[test]
+fn an_api_key_run_writes_no_answer_on_either_path() {
+    let mut app = test_app();
+    app.account_email = None;
+    app.consent_state = painted_notice("tos-2026", 3);
+    let accepted = dispatch_accept_consent(&mut app);
+    assert!(
+        !accepted
+            .iter()
+            .any(|e| matches!(e, Effect::PersistConsentAnswer { .. })),
+        "an answer under no account belongs to nobody",
+    );
+    assert!(
+        accepted
+            .iter()
+            .any(|e| matches!(e, Effect::RecordConsentUpstream { .. })),
+        "the acceptance still has to reach the server",
+    );
+    let acked = dispatch(
+        Action::TaskComplete(TaskResult::ConsentRecorded {
+            notice_id: "tos-2026".to_string(),
+            version: 3,
+        }),
+        &mut app,
+    );
+    assert!(
+        !acked
+            .iter()
+            .any(|e| matches!(e, Effect::PersistConsentAnswer { .. })),
+        "the server ack must not write the answer the accept path refused to",
+    );
+}
+/// The index a click or a number key carries is only worth anything if it reaches the right url.
+#[serial_test::serial(GROK_TEST_OPEN_URL_FILE)]
+#[test]
+fn a_consent_link_opens_the_url_its_label_stands_for() {
+    use crate::app::consent::{ConsentSegment, ConsentState};
+    let url_file =
+        std::env::temp_dir().join(format!("grok-consent-open-{}.txt", std::process::id()));
+    let _ = std::fs::remove_file(&url_file);
+    unsafe { std::env::set_var("GROK_TEST_OPEN_URL_FILE", &url_file) };
+    let opened = || std::fs::read_to_string(&url_file).unwrap_or_default();
+    let mut app = test_app();
+    app.consent_state = painted_notice("tos-2026", 3);
+    if let ConsentState::Pending { notice, .. } = &mut app.consent_state {
+        notice.segments = vec![
+            ConsentSegment::Link {
+                index: 0,
+                label: "Terms".to_string(),
+            },
+            ConsentSegment::Link {
+                index: 1,
+                label: "Acceptable Use Policy".to_string(),
+            },
+        ];
+        notice.links = vec![
+            "https://x.ai/legal/tos".to_string(),
+            "https://x.ai/legal/aup".to_string(),
+        ];
+    }
+    dispatch(Action::OpenConsentLink(1), &mut app);
+    assert!(
+        opened().lines().any(|l| l == "https://x.ai/legal/aup"),
+        "the second link must open the second url; got {:?}",
+        opened(),
+    );
+    let _ = std::fs::write(&url_file, "");
+    dispatch(Action::OpenConsentLink(9), &mut app);
+    app.consent_state = ConsentState::Done;
+    dispatch(Action::OpenConsentLink(0), &mut app);
+    assert!(opened().trim().is_empty(), "got {:?}", opened());
+    unsafe { std::env::remove_var("GROK_TEST_OPEN_URL_FILE") };
+    let _ = std::fs::remove_file(&url_file);
+}
 /// Accepting the trust question (its `finish_trust` tail) resolves trust and
 /// replays the deferred startup when auth is already done. (Declining quits
 /// instead -- see `welcome_trust_decline_keys_quit` in `app_view`.)
@@ -1317,6 +1523,11 @@ fn chat_mode_new_session_creates_with_chat_kind() {
             }
         )),
         "expected chat CreateSession under --chat, got {effects:?}"
+    );
+    let agent = app.agents.values().next().expect("agent");
+    assert!(
+        agent.conversation_entry,
+        "sticky --chat NewSession must stamp conversation_entry for rename kind"
     );
 }
 /// Atomicity: when several startup intents coexist (e.g. CLI
@@ -1681,6 +1892,213 @@ fn dispatch_new_session_has_empty_scrollback() {
     let new_id = AgentId(1);
     assert_eq!(app.agents[&new_id].scrollback.len(), 0);
 }
+/// Dashboard attach follows the new session after `/new`.
+#[test]
+fn dispatch_new_session_repoints_dashboard_attached_agent() {
+    use crate::views::dashboard::DashboardRowId;
+    let mut app = test_app_with_agent();
+    ensure_dashboard_state(&mut app);
+    app.dashboard.as_mut().unwrap().attached_agent = Some(AgentId(0));
+    app.active_view = ActiveView::Agent(AgentId(0));
+    dispatch(Action::NewSession, &mut app);
+    assert!(
+        matches!(app.active_view, ActiveView::Agent(id) if id == AgentId(1)),
+        "new session must switch active view to the new agent"
+    );
+    let d = app.dashboard.as_ref().unwrap();
+    assert_eq!(
+        d.attached_agent,
+        Some(AgentId(1)),
+        "attached_agent must re-point after /new so overlay back-out keeps working",
+    );
+    assert_eq!(
+        d.selected,
+        Some(DashboardRowId::TopLevel(AgentId(1))),
+        "focus_row must move selection to the new agent row",
+    );
+}
+/// Failed `/new` restores overlay attach to the survivor (not a dead placeholder).
+#[test]
+fn session_failed_orphan_restores_dashboard_attach_to_survivor() {
+    use crate::views::dashboard::DashboardRowId;
+    let mut app = test_app_with_agent();
+    ensure_dashboard_state(&mut app);
+    app.dashboard.as_mut().unwrap().attached_agent = Some(AgentId(0));
+    app.active_view = ActiveView::Agent(AgentId(0));
+    dispatch(Action::NewSession, &mut app);
+    let fail_id = AgentId(1);
+    assert!(
+        matches!(app.active_view, ActiveView::Agent(id) if id == fail_id),
+        "precondition: /new activated the orphan"
+    );
+    assert_eq!(
+        app.dashboard.as_ref().unwrap().attached_agent,
+        Some(fail_id),
+        "precondition: attach followed /new onto the orphan"
+    );
+    assert!(
+        app.agents[&fail_id].session.session_id.is_none(),
+        "precondition: create has not completed"
+    );
+    dispatch(
+        Action::TaskComplete(TaskResult::SessionFailed {
+            agent_id: fail_id,
+            error: "No space left on device".to_string(),
+        }),
+        &mut app,
+    );
+    assert!(!app.agents.contains_key(&fail_id));
+    assert!(
+        matches!(app.active_view, ActiveView::Agent(id) if id == AgentId(0)),
+        "view recovery returns to the survivor"
+    );
+    let d = app.dashboard.as_ref().unwrap();
+    assert_eq!(
+        d.attached_agent,
+        Some(AgentId(0)),
+        "attach must follow back to the survivor so overlay back-out keeps working",
+    );
+    assert_eq!(
+        d.selected,
+        Some(DashboardRowId::TopLevel(AgentId(0))),
+        "row focus must follow attach to the survivor",
+    );
+}
+/// Last-session orphan failure clears overlay attach when returning to Welcome.
+#[test]
+fn session_failed_last_orphan_clears_dashboard_attach() {
+    let mut app = test_app_with_agent();
+    ensure_dashboard_state(&mut app);
+    app.dashboard.as_mut().unwrap().attached_agent = Some(AgentId(0));
+    app.active_view = ActiveView::Agent(AgentId(0));
+    {
+        let a = app.agents.get_mut(&AgentId(0)).unwrap();
+        a.session.session_id = None;
+        a.session.forked_from = None;
+    }
+    dispatch(
+        Action::TaskComplete(TaskResult::SessionFailed {
+            agent_id: AgentId(0),
+            error: "No space left on device".to_string(),
+        }),
+        &mut app,
+    );
+    assert!(app.agents.is_empty());
+    assert!(matches!(app.active_view, ActiveView::Welcome));
+    assert_eq!(
+        app.dashboard.as_ref().unwrap().attached_agent,
+        None,
+        "Welcome recovery must clear overlay attach",
+    );
+}
+/// `/new` must not invent dashboard attach when none was set.
+#[test]
+fn dispatch_new_session_without_dashboard_attach_leaves_attached_none() {
+    let mut app = test_app_with_agent();
+    ensure_dashboard_state(&mut app);
+    assert!(app.dashboard.as_ref().unwrap().attached_agent.is_none());
+    dispatch(Action::NewSession, &mut app);
+    assert_eq!(
+        app.dashboard.as_ref().unwrap().attached_agent,
+        None,
+        "/new must not enable overlay chrome when the prior session was not attached",
+    );
+}
+#[test]
+fn dispatch_new_session_keeps_stale_attach_on_other_agent() {
+    let mut app = test_app_with_agent();
+    insert_placeholder_agent(&mut app, AgentId(1));
+    app.next_agent_id = 2;
+    app.active_view = ActiveView::Agent(AgentId(0));
+    ensure_dashboard_state(&mut app);
+    app.dashboard.as_mut().unwrap().attached_agent = Some(AgentId(1));
+    dispatch(Action::NewSession, &mut app);
+    assert!(
+        matches!(app.active_view, ActiveView::Agent(id) if id == AgentId(2)),
+        "new session must switch active view to the new agent"
+    );
+    assert_eq!(
+        app.dashboard.as_ref().unwrap().attached_agent,
+        Some(AgentId(1)),
+        "attach on a different agent must not be re-pointed to the new session",
+    );
+}
+/// Re-point must use top-level `active_view` id, not `get_active_agent`
+/// (subagent child views use placeholder `AgentId(0)`).
+#[test]
+fn dispatch_new_session_repoints_attach_while_subagent_view_open() {
+    use crate::views::dashboard::DashboardRowId;
+    let mut app = test_app();
+    let parent = AgentId(5);
+    let session = make_test_agent_session(&app, parent, "parent-session");
+    let mut parent_view = AgentView::new(session, ScrollbackState::new());
+    let child_session = make_test_agent_session(&app, AgentId(0), "child-session");
+    let child = AgentView::new(child_session, ScrollbackState::new());
+    parent_view
+        .subagent_views
+        .insert("child-sid".into(), Box::new(child));
+    parent_view.active_subagent = Some("child-sid".into());
+    app.agents.insert(parent, parent_view);
+    app.next_agent_id = 6;
+    app.active_view = ActiveView::Agent(parent);
+    assert_eq!(
+        get_active_agent(&app).map(|a| a.session.id),
+        Some(AgentId(0)),
+        "precondition: get_active_agent resolves subagent AgentId(0)"
+    );
+    ensure_dashboard_state(&mut app);
+    app.dashboard.as_mut().unwrap().attached_agent = Some(parent);
+    dispatch(Action::NewSession, &mut app);
+    let new_id = AgentId(6);
+    assert!(
+        matches!(app.active_view, ActiveView::Agent(id) if id == new_id),
+        "new session must switch to the new top-level agent"
+    );
+    let d = app.dashboard.as_ref().unwrap();
+    assert_eq!(
+        d.attached_agent,
+        Some(new_id),
+        "attach must re-point from top-level parent, not subagent AgentId(0)",
+    );
+    assert_eq!(
+        d.selected,
+        Some(DashboardRowId::TopLevel(new_id)),
+        "focus_row must select the new agent row",
+    );
+}
+/// Worktree Always `/new` must re-point attach the same way as plain `/new`.
+#[test]
+fn dispatch_new_worktree_session_repoints_dashboard_attached_agent() {
+    use crate::views::dashboard::DashboardRowId;
+    let mut app = test_app_with_agent();
+    app.cwd_has_git_ancestor = true;
+    ensure_dashboard_state(&mut app);
+    app.dashboard.as_mut().unwrap().attached_agent = Some(AgentId(0));
+    app.active_view = ActiveView::Agent(AgentId(0));
+    dispatch(
+        Action::NewWorktreeSession {
+            load_session_id: None,
+            label: None,
+            git_ref: None,
+        },
+        &mut app,
+    );
+    assert!(
+        matches!(app.active_view, ActiveView::Agent(id) if id == AgentId(1)),
+        "worktree /new must switch active view to the new agent"
+    );
+    let d = app.dashboard.as_ref().unwrap();
+    assert_eq!(
+        d.attached_agent,
+        Some(AgentId(1)),
+        "attached_agent must re-point after worktree /new so overlay back-out keeps working",
+    );
+    assert_eq!(
+        d.selected,
+        Some(DashboardRowId::TopLevel(AgentId(1))),
+        "focus_row must move selection to the new agent row",
+    );
+}
 #[test]
 fn translate_local_submit_always_returns_persist_always_for_new_session() {
     use crate::views::question_view::{LocalQuestionKind, QuestionViewState};
@@ -1806,6 +2224,16 @@ fn delete_current_session_confirm_emits_effect() {
             .local_kind,
         Some(crate::views::question_view::LocalQuestionKind::DeleteCurrentSession)
     ));
+    assert_eq!(
+        app.agents[&AgentId(0)]
+            .question_view
+            .as_ref()
+            .unwrap()
+            .questions[0]
+            .options[0]
+            .description,
+        "Remove history and return home"
+    );
     assert!(
         dispatch(
             Action::DeleteCurrentSessionAnswered { confirmed: false },
@@ -1835,6 +2263,178 @@ fn delete_current_session_confirm_emits_effect() {
                 after: AfterSessionDelete::Welcome,
                 ..
             }) if session_id == "sess-current"
+        ),
+        "got {effects:?}"
+    );
+}
+/// Reverting session-delete kills to the wire default (`ClientUi`) would auto-wake.
+#[test]
+fn delete_current_session_kills_bg_tasks_as_teardown() {
+    use xai_grok_shell::extensions::task::TaskKillSource;
+    let mut app = test_app_with_agent();
+    {
+        let a = app.agents.get_mut(&AgentId(0)).unwrap();
+        a.session.session_id = Some(acp::SessionId::new("sess-del"));
+        a.session.cwd = std::path::PathBuf::from("/repo");
+        a.session
+            .bg_tasks
+            .insert("bg-del".into(), super::super::make_bg_task("bg-del"));
+    }
+    assert!(dispatch(Action::DeleteCurrentSession, &mut app).is_empty());
+    let effects = dispatch(
+        Action::DeleteCurrentSessionAnswered { confirmed: true },
+        &mut app,
+    );
+    assert!(
+        effects.iter().any(|e| matches!(
+            e,
+            Effect::KillBgTask {
+                task_id,
+                source: TaskKillSource::Teardown,
+                ..
+            } if task_id == "bg-del"
+        )),
+        "session delete must emit Teardown, got {effects:?}"
+    );
+    assert!(
+        !effects.iter().any(|e| matches!(
+            e,
+            Effect::KillBgTask {
+                source: TaskKillSource::ClientUi,
+                ..
+            }
+        )),
+        "session delete must not emit ClientUi, got {effects:?}"
+    );
+}
+#[test]
+fn delete_current_session_confirm_from_dashboard_emits_dashboard_after() {
+    use crate::app::actions::AfterSessionDelete;
+    let mut app = test_app_with_agent();
+    {
+        let a = app.agents.get_mut(&AgentId(0)).unwrap();
+        a.session.session_id = Some(acp::SessionId::new("sess-dashboard"));
+        a.session.cwd = std::path::PathBuf::from("/repo");
+    }
+    ensure_dashboard_state(&mut app);
+    app.dashboard.as_mut().unwrap().attached_agent = Some(AgentId(0));
+    assert!(dispatch(Action::DeleteCurrentSession, &mut app).is_empty());
+    assert_eq!(
+        app.agents[&AgentId(0)]
+            .question_view
+            .as_ref()
+            .unwrap()
+            .questions[0]
+            .options[0]
+            .description,
+        "Remove history and return to the dashboard"
+    );
+    let effects = dispatch(
+        Action::DeleteCurrentSessionAnswered { confirmed: true },
+        &mut app,
+    );
+    assert!(
+        matches!(
+            effects.first(),
+            Some(Effect::CancelTurn {
+                cancel_subagents: true,
+                ..
+            })
+        ),
+        "must cancel the turn/subagents before delete, got {effects:?}"
+    );
+    assert!(
+        matches!(
+            effects.last(),
+            Some(Effect::DeleteSession {
+                session_id,
+                after: AfterSessionDelete::Dashboard,
+                ..
+            }) if session_id == "sess-dashboard"
+        ),
+        "got {effects:?}"
+    );
+}
+/// Dashboard state can exist without overlay attach; must still Welcome.
+#[test]
+fn delete_current_session_dashboard_state_without_attach_stays_welcome() {
+    use crate::app::actions::AfterSessionDelete;
+    let mut app = test_app_with_agent();
+    {
+        let a = app.agents.get_mut(&AgentId(0)).unwrap();
+        a.session.session_id = Some(acp::SessionId::new("sess-no-attach"));
+        a.session.cwd = std::path::PathBuf::from("/repo");
+    }
+    ensure_dashboard_state(&mut app);
+    assert!(app.dashboard.as_ref().unwrap().attached_agent.is_none());
+    assert!(dispatch(Action::DeleteCurrentSession, &mut app).is_empty());
+    assert_eq!(
+        app.agents[&AgentId(0)]
+            .question_view
+            .as_ref()
+            .unwrap()
+            .questions[0]
+            .options[0]
+            .description,
+        "Remove history and return home"
+    );
+    let effects = dispatch(
+        Action::DeleteCurrentSessionAnswered { confirmed: true },
+        &mut app,
+    );
+    assert!(
+        matches!(
+            effects.last(),
+            Some(Effect::DeleteSession {
+                after: AfterSessionDelete::Welcome,
+                ..
+            })
+        ),
+        "got {effects:?}"
+    );
+}
+/// Stale attach on a different agent must not steer /delete to Dashboard.
+#[test]
+fn delete_current_session_stale_attach_other_agent_stays_welcome() {
+    use crate::app::actions::AfterSessionDelete;
+    let mut app = test_app_with_agent();
+    {
+        let a = app.agents.get_mut(&AgentId(0)).unwrap();
+        a.session.session_id = Some(acp::SessionId::new("sess-active"));
+        a.session.cwd = std::path::PathBuf::from("/repo");
+    }
+    let other = AgentId(1);
+    let session = make_test_agent_session(&app, other, "other");
+    app.agents
+        .insert(other, AgentView::new(session, ScrollbackState::new()));
+    app.agents.get_mut(&other).unwrap().session.session_id =
+        Some(acp::SessionId::new("sess-other"));
+    ensure_dashboard_state(&mut app);
+    app.dashboard.as_mut().unwrap().attached_agent = Some(other);
+    app.active_view = ActiveView::Agent(AgentId(0));
+    assert!(dispatch(Action::DeleteCurrentSession, &mut app).is_empty());
+    assert_eq!(
+        app.agents[&AgentId(0)]
+            .question_view
+            .as_ref()
+            .unwrap()
+            .questions[0]
+            .options[0]
+            .description,
+        "Remove history and return home"
+    );
+    let effects = dispatch(
+        Action::DeleteCurrentSessionAnswered { confirmed: true },
+        &mut app,
+    );
+    assert!(
+        matches!(
+            effects.last(),
+            Some(Effect::DeleteSession {
+                session_id,
+                after: AfterSessionDelete::Welcome,
+                ..
+            }) if session_id == "sess-active"
         ),
         "got {effects:?}"
     );
@@ -1880,6 +2480,36 @@ fn delete_current_session_complete_welcome_and_guard() {
     assert!(matches!(app.active_view, ActiveView::Agent(id) if id == other));
     assert!(!app.agents.contains_key(&AgentId(0)));
     assert!(!effects.iter().any(|e| matches!(e, Effect::Quit)));
+}
+#[test]
+fn delete_current_session_complete_returns_to_dashboard() {
+    use crate::app::actions::{AfterSessionDelete, TaskResult};
+    let mut app = test_app_with_agent();
+    app.agents.get_mut(&AgentId(0)).unwrap().session.session_id =
+        Some(acp::SessionId::new("sess-dash"));
+    ensure_dashboard_state(&mut app);
+    app.dashboard.as_mut().unwrap().attached_agent = Some(AgentId(0));
+    app.active_view = ActiveView::Agent(AgentId(0));
+    let effects = dispatch_task_result(
+        TaskResult::DeleteSessionComplete {
+            source: "current".into(),
+            session_id: "sess-dash".into(),
+            after: AfterSessionDelete::Dashboard,
+        },
+        &mut app,
+    );
+    assert!(matches!(app.active_view, ActiveView::AgentDashboard));
+    assert!(app.agents.is_empty());
+    assert!(app.dashboard.is_some());
+    assert!(
+        app.dashboard.as_ref().unwrap().attached_agent.is_none(),
+        "delete complete must clear attach on the removed agent"
+    );
+    assert!(
+        effects
+            .iter()
+            .any(|e| matches!(e, Effect::UnregisterActiveSession { .. }))
+    );
 }
 #[test]
 fn entry_title_falls_back_to_short_session_id_when_no_prompt() {
@@ -2642,6 +3272,8 @@ mod welcome_workspace_mode {
             branch: None,
             repo_name: String::new(),
             worktree_label: None,
+            last_turn_summary: None,
+            last_recap: None,
             card_detail: None,
         }]);
         let effects = dispatch(Action::PickSession(0), &mut app);
@@ -2687,6 +3319,8 @@ mod welcome_workspace_mode {
             branch: None,
             repo_name: String::new(),
             worktree_label: None,
+            last_turn_summary: None,
+            last_recap: None,
             card_detail: None,
         }]);
         let effects = dispatch(Action::PickSession(0), &mut app);
@@ -2746,6 +3380,8 @@ mod welcome_workspace_mode {
             branch: None,
             repo_name: String::new(),
             worktree_label: None,
+            last_turn_summary: None,
+            last_recap: None,
             card_detail: None,
         }]);
         let _ = dispatch(Action::PickSessionInWorktree(0), &mut app);
@@ -2783,6 +3419,8 @@ mod welcome_workspace_mode {
             branch: None,
             repo_name: String::new(),
             worktree_label: None,
+            last_turn_summary: None,
+            last_recap: None,
             card_detail: None,
         }]);
         let effects = dispatch(Action::PickSessionInWorktree(0), &mut app);
@@ -2827,6 +3465,8 @@ mod welcome_workspace_mode {
             branch: None,
             repo_name: String::new(),
             worktree_label: None,
+            last_turn_summary: None,
+            last_recap: None,
             card_detail: None,
         }]);
         let effects = dispatch(Action::PickSessionInWorktree(0), &mut app);
@@ -2870,6 +3510,8 @@ mod welcome_workspace_mode {
             branch: None,
             repo_name: String::new(),
             worktree_label: None,
+            last_turn_summary: None,
+            last_recap: None,
             card_detail: None,
         }]);
         let effects = dispatch(Action::PickSession(0), &mut app);
@@ -2916,6 +3558,8 @@ mod welcome_workspace_mode {
             branch: None,
             repo_name: String::new(),
             worktree_label: None,
+            last_turn_summary: None,
+            last_recap: None,
             card_detail: None,
         }]);
         let effects = dispatch(Action::PickSession(0), &mut app);
@@ -2989,6 +3633,8 @@ mod welcome_workspace_mode {
             branch: None,
             repo_name: String::new(),
             worktree_label: None,
+            last_turn_summary: None,
+            last_recap: None,
             card_detail: None,
         }]);
         let effects = dispatch(Action::PickSession(0), &mut app);
@@ -3062,6 +3708,8 @@ mod welcome_workspace_mode {
             branch: None,
             repo_name: String::new(),
             worktree_label: None,
+            last_turn_summary: None,
+            last_recap: None,
             card_detail: None,
         }]);
         let effects = dispatch(Action::PickSession(0), &mut app);

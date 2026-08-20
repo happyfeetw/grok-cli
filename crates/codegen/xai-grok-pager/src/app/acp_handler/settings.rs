@@ -11,38 +11,30 @@ pub(super) fn handle_models_update(notif: &acp::ExtNotification, app: &mut AppVi
             "models updated via x.ai/models/update"
         );
 
-        let shell_fallback_current = new_models.current.clone();
-
-        // Override app-level default with the active agent's model.
-        let mut app_models = new_models.clone();
-        if let ActiveView::Agent(id) = app.active_view
-            && let Some(agent) = app.agents.get(&id)
-            && let Some(ref agent_model) = agent.session.models.current
-            && app_models.available.contains_key(agent_model)
-        {
-            app_models.current = Some(agent_model.clone());
+        app.models.update_catalog(new_models.available.clone());
+        let stale = app
+            .models
+            .current
+            .as_ref()
+            .is_none_or(|id| !app.models.available.contains_key(id));
+        if stale && let Some(id) = new_models.current {
+            app.models.set_current(id, None);
         }
 
-        app.models = app_models;
-
         for agent in app.agents.values_mut() {
-            // Log when an update drops the agent's active model — this is the
-            // moment the status bar visibly "switches model mid-conversation"
-            // (the agent falls back to the shell's current model below).
             if let Some(ref current) = agent.session.models.current
                 && !new_models.available.contains_key(current)
             {
-                tracing::warn!(
+                tracing::debug!(
                     current_model = %current.0,
-                    fallback = ?shell_fallback_current.as_ref().map(|m| m.0.as_ref()),
                     available_count = new_models.available.len(),
-                    "models update removed this agent's current model; falling back"
+                    "models update dropped this session's model from the catalog; keeping it displayed"
                 );
             }
             agent
                 .session
                 .models
-                .update_catalog(new_models.available.clone(), shell_fallback_current.clone());
+                .update_catalog(new_models.available.clone());
         }
         true
     } else {
@@ -211,6 +203,17 @@ pub(super) fn handle_settings_update(notif: &acp::ExtNotification, app: &mut App
     //   allow_access=Some(false) without a gate_message must NOT clear the
     //   gate (gate_from_settings returns None when gate_message is absent,
     //   which would incorrectly lift an existing gate).
+
+    // A fresh machine has no auth at startup, so the prefetch never runs and the startup seed sees
+    // no settings. Welcome only: arming behind a session blocks new sessions on an unseen screen.
+    if let Some(gate) = update.consent_gate.as_ref()
+        && matches!(app.consent_state, crate::app::consent::ConsentState::Done)
+        && matches!(app.active_view, crate::app::app_view::ActiveView::Welcome)
+        && app.agents.is_empty()
+    {
+        crate::app::event_loop::seed_consent_state_from_gate(app, Some(gate));
+    }
+
     if update.allow_access == Some(true) {
         let effs = app.lift_gate();
         app.pending_effects.extend(effs);
@@ -575,6 +578,13 @@ pub(super) struct PagerSettingsUpdate {
     collapsed_edit_blocks: Option<bool>,
     #[serde(default)]
     subscription_watch_interval_secs: Option<u64>,
+    /// Tolerant for the same reason as the settings response it mirrors: a malformed gate must not
+    /// discard the tier, permission mode and campaigns that arrive with it.
+    #[serde(
+        default,
+        deserialize_with = "xai_grok_shell::util::config::deserialize_tolerant"
+    )]
+    consent_gate: Option<xai_grok_shell::util::config::ConsentGate>,
 }
 
 /// Presence-aware string: omit → `None` (`#[serde(default)]`), null →
@@ -651,6 +661,21 @@ mod presence_aware_dto_tests {
             some_v.permission_mode,
             Some(Some("always-approve".into())),
             "string must be Some(Some(_))"
+        );
+    }
+
+    #[test]
+    fn malformed_consent_gate_does_not_discard_the_rest_of_the_update() {
+        let update: PagerSettingsUpdate = serde_json::from_value(serde_json::json!({
+            "consent_gate": {"version": "not-a-number"},
+            "tips": ["still applied"],
+        }))
+        .expect("a malformed gate must not fail the whole update");
+
+        assert!(update.consent_gate.is_none());
+        assert_eq!(
+            update.tips.as_deref(),
+            Some(&["still applied".to_string()][..]),
         );
     }
 

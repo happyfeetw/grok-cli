@@ -575,6 +575,8 @@ mod tests {
             git_root_dir: Some("/Users/me/xai".into()),
             git_remotes: vec!["git@github.com:example/repo.git".into()],
             source_workspace_dir: Some("/Users/me/xai-src".into()),
+            last_turn_summary: None,
+            last_recap: None,
             session_kind: Some("worktree".into()),
         }
     }

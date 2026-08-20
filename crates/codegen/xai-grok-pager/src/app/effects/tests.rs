@@ -17,6 +17,20 @@ fn format_acp_error_reads_detail_from_wrapped_data() {
     assert_eq!(format_acp_error(&wrapped, false), "model does not support tools");
 }
 #[test]
+fn format_acp_error_formats_http_500_dump() {
+    let err = acp::Error::internal_error()
+        .data(
+            serde_json::json!({
+            "message": "API error (status 500 Internal Server Error): {\"error\":\"upstream exploded\"}",
+            "http_status": 500
+        }),
+        );
+    assert_eq!(
+            format_acp_error(&err, false),
+            "Server error (500) \u{2014} Something went wrong on our side. Wait a minute and send again."
+        );
+}
+#[test]
 fn format_acp_error_rate_limit_surfaces_detail_or_fallback() {
     use xai_grok_shell::sampling::error::{
         FREE_USAGE_USER_MESSAGE, RATE_LIMITED_ERROR_CODE,
@@ -175,6 +189,33 @@ fn picker_keeps_untitled_conversation_as_untitled() {
     assert_eq!(entries.len(), 1, "untitled conversation must not vanish");
     assert_eq!(entries[0].summary, "Untitled");
     assert_eq!(entries[0].source, "conversation");
+}
+/// The recap and last-turn summary ride the session-list wire and land on
+/// the picker entry so the expanded card can show them.
+#[test]
+fn picker_parses_last_recap_and_last_turn_summary() {
+    let recent = chrono::Utc::now().to_rfc3339();
+    let payload = serde_json::json!({
+            "sessions": [{
+                "sessionId": "s_recap",
+                "cwd": "/Users/me/xai",
+                "summary": "Auth refactor",
+                "source": "local",
+                "updatedAt": recent,
+                "lastTurnSummary": "Wired retries into billing",
+                "lastRecap": "Where we left off: auth refactor across the API"
+            }]
+        });
+    let entries = parse_session_picker_entries(&payload);
+    assert_eq!(entries.len(), 1);
+    assert_eq!(
+            entries[0].last_turn_summary.as_deref(),
+            Some("Wired retries into billing")
+        );
+    assert_eq!(
+            entries[0].last_recap.as_deref(),
+            Some("Where we left off: auth refactor across the API")
+        );
 }
 /// Canary: the empty-summary drop still applies to Build rows.
 #[test]
@@ -788,6 +829,17 @@ async fn persist_setting_type_mismatch_errors_page_flip_on_send() {
         );
 }
 #[tokio::test]
+async fn persist_setting_type_mismatch_errors_confirm_before_rewind() {
+    use crate::settings::SettingValue;
+    let r = persist_setting("confirm_before_rewind", SettingValue::String("nope".into()))
+        .await;
+    let err = r.expect_err("confirm_before_rewind with String payload must return Err");
+    assert!(
+            err.contains("persist_setting(confirm_before_rewind) expected Bool"),
+            "got: {err}",
+        );
+}
+#[tokio::test]
 async fn persist_setting_type_mismatch_errors_combine_queued_prompts() {
     use crate::settings::SettingValue;
     let r = persist_setting(
@@ -842,7 +894,7 @@ fn setup_grok_home_in_tempdir() -> tempfile::TempDir {
     tmp
 }
 fn register_session_in(root: &std::path::Path, id: &str) -> acp::SessionId {
-    use xai_grok_shell::active_sessions::{ActiveSession, register_in};
+    use xai_grok_active_sessions::{ActiveSession, register_in};
     let session_id = acp::SessionId::new(id);
     register_in(
             root,
@@ -863,7 +915,7 @@ fn unregister_best_effort_removes_entry_when_lock_free() {
     let sid = register_session_in(dir.path(), "s1");
     unregister_active_session_best_effort_in(dir.path(), &sid);
     assert!(
-            xai_grok_shell::active_sessions::list_in(dir.path())
+            xai_grok_active_sessions::list_in(dir.path())
                 .expect("list")
                 .is_empty(),
             "lock-free unregister must remove the entry",
@@ -902,7 +954,7 @@ fn unregister_best_effort_is_nonblocking_under_lock_contention() {
             "contended unregister blocked on the shared flock instead of skipping",
         );
     assert_eq!(
-            xai_grok_shell::active_sessions::list_in(dir.path())
+            xai_grok_active_sessions::list_in(dir.path())
                 .expect("list")
                 .len(),
             1,
@@ -1390,7 +1442,7 @@ async fn foreign_scan_task_echoes_sequence_without_enabled_sources() {
     execute(
         Effect::ScanForeignSessions {
             cwd: PathBuf::from("/path/that/must/not/be-read"),
-            compat: xai_grok_workspace::foreign_sessions::EnabledForeignSessionSources::default(),
+            compat: xai_grok_foreign_sessions::EnabledForeignSessionSources::default(),
             grok_home: PathBuf::from("/path/that/must/not/be-read"),
             coordinator: app_coordinator.clone(),
             seq: 41,
@@ -1443,7 +1495,7 @@ async fn foreign_resume_detection_runs_as_task_result() {
     let (quit, _) = execute(
         Effect::DetectForeignResumeHint {
             canonical_cwd: canonical_cwd.clone(),
-            compat: xai_grok_workspace::foreign_sessions::EnabledForeignSessionSources::default(),
+            compat: xai_grok_foreign_sessions::EnabledForeignSessionSources::default(),
             grok_home: PathBuf::from("/path/that/must/not-be-read"),
             launch_token: 8,
         },
@@ -2401,6 +2453,35 @@ fn format_session_info_hides_resolved_when_disabled() {
     assert!(text.contains("Model: grok-4.5"));
     assert!(!text.contains("grok-4.3"));
 }
+/// The (cwd, id)-derived summary path resolves and `generated_title` wins.
+#[tokio::test]
+async fn lookup_session_title_loads_single_summary_by_cwd() {
+    let root = tempfile::tempdir().unwrap();
+    let cwd = "/workspace";
+    let dir = root
+        .path()
+        .join("sessions")
+        .join(xai_grok_shell::util::grok_home::encode_cwd_dirname(cwd))
+        .join("sess-1");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+            dir.join("summary.json"),
+            serde_json::json!({
+                "info": { "id": "sess-1", "cwd": cwd },
+                "session_summary": "raw summary",
+                "created_at": "2026-01-01T00:00:00Z",
+                "updated_at": "2026-01-01T00:00:00Z",
+                "num_messages": 1,
+                "current_model_id": "m",
+                "generated_title": "Renamed title"
+            })
+                .to_string(),
+        )
+        .unwrap();
+    let id = acp::SessionId::new("sess-1");
+    let title = lookup_session_title_in(root.path().to_path_buf(), &id, cwd).await;
+    assert_eq!(title.as_deref(), Some("Renamed title"));
+}
 #[test]
 fn format_session_info_no_parens_when_resolved_matches_requested() {
     let info = make_session_info("grok-4.5", Some("grok-4.5"), 1000, 10000);
@@ -2532,6 +2613,8 @@ fn session_picker_entry_maps_to_dormant_roster_row() {
         branch: None,
         repo_name: "repo-app".to_string(),
         worktree_label: Some("wt".to_string()),
+        last_turn_summary: Some("Fixed the parser".to_string()),
+        last_recap: None,
         card_detail: None,
     };
     let roster = session_picker_entry_to_roster(&entry);
@@ -2541,8 +2624,21 @@ fn session_picker_entry_maps_to_dormant_roster_row() {
     assert!(roster.is_worktree, "worktree_label present → is_worktree");
     assert_eq!(roster.model_id.as_deref(), Some("grok-4"));
     assert_eq!(roster.activity, RosterActivity::Dormant);
+    assert_eq!(
+            roster.last_turn_summary.as_deref(),
+            Some("Fixed the parser")
+        );
     assert!(!roster.resident);
     assert_eq!(roster.last_change_unix_ms, updated.timestamp_millis());
     assert_eq!(roster.origin.kind, "local");
     assert_eq!(roster.origin.host.as_deref(), Some("box"));
+}
+#[test]
+fn rewind_execute_params_sends_conversation_only_with_force() {
+    let params = rewind_execute_params("sess-1", 3);
+    assert_eq!(params["sessionId"], "sess-1");
+    assert_eq!(params["targetPromptIndex"], 3);
+    assert_eq!(params["force"], true);
+    assert_eq!(params["mode"], REWIND_MODE_WIRE);
+    assert_eq!(params["mode"], "conversation_only");
 }
