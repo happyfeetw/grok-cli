@@ -9,8 +9,10 @@ description = "Shared reqwest HTTP clients and User-Agent construction for the g
 # Workspace reqwest already enables `system-proxy`. Keep it explicit on the
 # shared-client crate so OS proxy discovery (macOS Network settings, etc.)
 # cannot silently regress if workspace features are edited. Env vars win.
-reqwest = { workspace = true, features = ["blocking", "system-proxy"] }
+reqwest = { workspace = true, features = ["blocking", "rustls-tls-native-roots", "system-proxy"] }
 reqwest-middleware = { workspace = true }
+# Same 0.23 as reqwest's rustls, so the certificate classifier's downcast resolves.
+rustls = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
 xai-grok-auth = { workspace = true, features = ["middleware"] }
@@ -19,6 +21,9 @@ xai-grok-sampler = { path = "../xai-grok-sampler" }
 xai-grok-telemetry = { workspace = true }
 xai-grok-version = { workspace = true }
 xai-grok-workspace = { workspace = true }
+
+[dev-dependencies]
+rcgen = { workspace = true }
 
 [lints]
 workspace = true
