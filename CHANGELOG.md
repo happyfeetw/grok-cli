@@ -14,6 +14,14 @@ packaging, branding, and distribution.
 
 ## [Unreleased]
 
+## [1.0.12-1] - 2026-09-19
+
+### Changed
+
+- Merged upstream `xai-org/grok-build` through `bc7f02eddd3d`.
+- Preserved this fork’s `grok-cli` branding, `@spikewang` packaging,
+  `system-proxy` support, and strict upstream third-party dependency pins.
+
 ## [1.0.10-1] - 2026-08-29
 
 ### Changed
